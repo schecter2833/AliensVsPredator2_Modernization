@@ -33,3 +33,8 @@ out/
 *.pdb
 *.ilk
 __pycache__/
+
+# REA / Ghidra working files (may embed game code)
+*.snap
+work/
+evidence/

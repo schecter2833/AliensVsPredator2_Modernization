@@ -26,7 +26,7 @@ This repository contains **no game files**: no executables, DLLs, `.rez` archive
 
 | Path | Contents |
 |---|---|
-| `tools/` | Research utilities (REZ archive extractor, PE inventory) |
+| `tools/` | Research utilities (REZ extractor, PE inventory, REA renderer-slot comparison) |
 | `src/renderer/` | Replacement for `d3d.ren` (planned) |
 | `src/hooks/` | Engine fix and hook layer (planned) |
 | `docs/` | Roadmap, findings, file-format notes |
@@ -39,6 +39,10 @@ python tools/rez.py "C:/Games/AVP2/AVP2DLL.REZ"            # list contents
 python tools/rez.py "C:/Games/AVP2/AVP2DLL.REZ" extracted/  # extract (git-ignored)
 python tools/pe_inventory.py lithtech.exe d3d.ren server.dll
 ```
+
+## Reverse engineering
+
+We use [REA](https://reverseengineeranything.org) with Ghidra 12.2. See [docs/RE-SETUP.md](docs/RE-SETUP.md).
 
 ## Contributing
 
