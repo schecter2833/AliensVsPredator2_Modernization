@@ -33,6 +33,27 @@ Client-side only, so no effect on multiplayer.
 - [x] Borderless fullscreen with aspect-correct scaling; window centered correctly on wide displays
 - [ ] Gamma that doesn't change the desktop; smoother alt-tab
 
+## Phase 1b: Modern graphics and mod support
+Our renderer owns every pixel, so graphics upgrades can live there without touching game files (multiplayer stays compatible).
+- [ ] Texture replacement: load high-res PNG/DDS overrides from a `mods/textures/` folder, keyed by the original texture name, with the stock texture as fallback
+- [ ] Mod load order: several mod folders stacked, later folders win
+- [ ] Shader-based lighting: per-pixel lightmap filtering, gamma-correct blending, optional bloom and tonemapping
+- [ ] Anti-aliasing (MSAA, plus an optional post-process AA), anisotropic filtering, and supersampling
+- [ ] Normal and specular map support for replacement textures
+- [ ] User shader hooks (a ReShade-style post-process chain, loaded from files)
+- [ ] Model replacement (higher-poly models) once the model format is mapped
+- [ ] Config file for all of the above, plus an in-game toggle
+
+## Rust
+New components get written in Rust where it fits; the existing C renderer gets ported once its 3D contract is stable.
+- Every engine boundary is a plain C ABI (`RenderDLLSetup`, cdecl slot tables), so a Rust `cdylib` built for `i686-pc-windows-gnu` or `-msvc` can replace any C component one at a time.
+- Order:
+  1. Master server: standalone, runs anywhere, no 32-bit constraint, so it's a good first Rust component.
+  2. Renderer: port `avp2m_d3d11.c` to Rust (`windows` crate for D3D11) after Milestone 2. Today it's one ~1,500-line file, so the port is cheap. Porting it now would mean doing the 3D reverse engineering twice.
+  3. Hook layer and dedicated server: Rust from the start.
+- The clean-room header (`render_struct.h`) becomes a `#[repr(C)]` module with the same size checks.
+- Builds go through CI (GitHub Actions on Windows), since the 32-bit Windows toolchains are what the game needs.
+
 ## Phase 2: Engine hook layer
 An injected DLL that patches `lithtech.exe` at runtime. The files on disk are never touched.
 - [ ] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game)
@@ -58,4 +79,4 @@ An injected DLL that patches `lithtech.exe` at runtime. The files on disk are ne
 ## Non-goals (for now)
 - Rewriting the game logic in `CShell` / `Object.LTO` (it would break multiplayer verification)
 - Redistributing or modifying any game assets
-- High-res texture packs (community packs already exist; they're not engine work)
+- Shipping texture packs ourselves (we provide the loader; packs come from the community)
