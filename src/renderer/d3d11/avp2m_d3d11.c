@@ -24,7 +24,7 @@
 
 #include "../render_struct.h"
 
-#define RENDERER_VERSION "0.2.0-dev"
+#define RENDERER_VERSION "0.3.0-dev"
 #define MAX_QUADS_PER_BATCH 4096
 
 /* ------------------------------------------------------------------ */
@@ -103,7 +103,7 @@ static UINT g_vb_pos;                          /* in vertices */
 static Surface g_surfaces = { 0 };             /* list head   */
 
 /* 3D world (milestone 2, step 1: untextured geometry) */
-typedef struct WVertex { float x, y, z, u, v; uint32_t rgba; } WVertex;
+typedef struct WVertex { float x, y, z, u, v, lu, lv; uint32_t rgba; } WVertex;
 
 /* Renderer-side texture, created from engine TextureData. Its pointer is
  * stored in SharedTexture+0x0C, like the stock renderer does. */
@@ -116,16 +116,29 @@ typedef struct RTexture {
 } RTexture;
 static RTexture *g_textures;
 
-typedef struct DrawBatch { RTexture *tex; UINT first, count; } DrawBatch;
+typedef struct DrawBatch { RTexture *tex; int lmpage; UINT first, count; } DrawBatch;
+
+/* Lightmap atlas pages (built per world at load). */
+#define LM_PAGE 2048
+typedef struct LMPage {
+    ID3D11Texture2D *tex;
+    ID3D11ShaderResourceView *srv;
+} LMPage;
 typedef struct RenderContext {
     void *world;                     /* engine world (first field of the init block) */
     ID3D11Buffer *vb;
     UINT vcount;
     DrawBatch *batches;
     UINT nbatches;
+    LMPage *lmpages;
+    int nlmpages;
+    ID3D11Buffer *cvb;               /* vertex colours (stream 1); alpha 1 = lightmapped */
+    uint32_t *vcol;                  /* CPU copy, for light animation updates later */
     int built;
 } RenderContext;
 static RenderContext *g_cur_ctx;
+static float g_lmscale = 1.0f;       /* cvar avp2m_lmscale x100 */
+static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vertex colour only */
 static ID3D11VertexShader *g_vs3d;
 static ID3D11PixelShader  *g_ps3d;
 static ID3D11InputLayout  *g_layout3d;
@@ -157,19 +170,27 @@ static const char *cvar_string(const char *name)
 static int cvar_int(const char *name, int def)
 {
     const char *s = cvar_string(name);
-    return s ? atoi(s) : def;
+    return (s && *s) ? atoi(s) : def;
 }
 
 /* ------------------------------------------------------------------ */
 /* Shaders                                                              */
 /* ------------------------------------------------------------------ */
 static const char k_hlsl3d[] =
-    "cbuffer C : register(b0) { float4x4 vp; };\n"
-    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
-    "struct VI { float3 p : POSITION; float2 uv : TEXCOORD; float4 c : COLOR; };\n"
-    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD; float4 c : COLOR; };\n"
-    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.uv = i.uv; o.c = i.c; return o; }\n"
-    "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5); return float4(c.rgb * i.c.rgb, 1); }\n";
+    "cbuffer C : register(b0) { float4x4 vp; float4 lmscale; };\n"
+    "Texture2D t : register(t0); Texture2D lm : register(t1);\n"
+    "SamplerState s : register(s0); SamplerState sl : register(s1);\n"
+    "struct VI { float3 p : POSITION; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
+    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.uv = i.uv; o.luv = i.luv; o.c = i.c; return o; }\n"
+    "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5);\n"
+    "  float3 lmc = lm.Sample(sl, i.luv).rgb * lmscale.x * i.c.a;\n"
+    "  float3 l = i.c.a > 0.5 ? lmc : i.c.rgb;\n"
+    "  if (lmscale.y > 3.5) return float4(lerp(dot(c.rgb, 0.33).xxx, i.c.a > 0.5 ? float3(1,0.2,0.2) : float3(0.2,1,0.2), 0.5), 1);\n"
+    "  if (lmscale.y > 2.5) return float4(lmc, 1);\n"
+    "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
+    "  if (lmscale.y > 0.5) return float4(saturate(l), 1);\n"
+    "  return float4(saturate(c.rgb * l), 1); }\n";
 
 static const char k_hlsl[] =
     "cbuffer C : register(b0) { float4 xf; };\n"
@@ -215,10 +236,11 @@ static int create_shaders(void)
     if (FAILED(hr)) return 0;
 
     {
-        D3D11_INPUT_ELEMENT_DESC il3[3] = {
+        D3D11_INPUT_ELEMENT_DESC il3[4] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
             { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
-            { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 20, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 1, DXGI_FORMAT_R32G32_FLOAT,    0, 20, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  1, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
         };
         vsb = psb = err = NULL;
         hr = compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "vs", "vs_4_0", 0, 0, &vsb, &err);
@@ -226,7 +248,7 @@ static int create_shaders(void)
         if (FAILED(hr)) { rlog("3D shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?"); return 0; }
         hr = ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), NULL, &g_vs3d);
         if (SUCCEEDED(hr)) hr = ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(psb), ID3D10Blob_GetBufferSize(psb), NULL, &g_ps3d);
-        if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 3, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
+        if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 4, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
         ID3D10Blob_Release(vsb);
         ID3D10Blob_Release(psb);
     }
@@ -279,7 +301,7 @@ static int create_objects(void)
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb))) return 0;
 
     memset(&bd, 0, sizeof bd);
-    bd.ByteWidth = 64;
+    bd.ByteWidth = 80;               /* float4x4 vp + float4 lmscale */
     bd.Usage = D3D11_USAGE_DYNAMIC;
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
@@ -824,17 +846,277 @@ static void release_all_textures(void)
     while (g_textures) release_texture(g_textures);
 }
 
-typedef struct BuildTri { RTexture *tex; WVertex v[3]; } BuildTri;
+/* ------------------------------------------------------------------ */
+/* Lightmaps                                                            */
+/* ------------------------------------------------------------------ */
+/* Engine layout (see docs/renderer-interface.md, "Lightmaps"):
+ *   world+0x08/+0x0C  light animation array (0x60 bytes each) and count
+ *   world+0xF8        lightmap grid size (world units per texel)
+ *   poly+0x0C/+0x10   list of {u16 anim, u16 entry} refs and count
+ *   poly+0x14         flags; (flags >> 11) & 7 selects the lightmap axis frame
+ *   poly+0x38         lightmap origin; poly+0x4C/+0x4D lightmap width/height
+ *   anim+0x20         0 = baked colour frames (others are shadow-mask lights)
+ *   anim+0x24         frame table: frame -> array of 0x18-byte entries
+ *   anim+0x30         u16 entry count; +0x34/+0x38 frames A/B; +0x3C blend 0..255
+ *   anim+0x40         float intensity
+ *   entry+0 / +4      RLE data pointer / u16 byte size
+ * RLE: a u32 0x00RRGGBB pixel; if bit 31 is set a u8 run length follows. */
+#define LM_MAX_TEXELS 1024
+
+/* Reference "up" vector per lightmap axis frame; P = R x N, Q = N x P. */
+static const float k_lm_ref[6][3] = {
+    { 0, 0, -1 }, { 0, 0, 1 }, { 0, 1, 0 }, { 0, -1, 0 }, { 0, -1, 0 }, { 0, -1, 0 },
+};
+
+static void cross3(const float *a, const float *b, float *o)
+{
+    o[0] = a[1] * b[2] - a[2] * b[1];
+    o[1] = a[2] * b[0] - a[0] * b[2];
+    o[2] = a[0] * b[1] - a[1] * b[0];
+}
+
+static int lm_decode(const uint8_t *src, uint32_t size, uint32_t *dst, uint32_t count)
+{
+    const uint8_t *end = src + size;
+    uint32_t outn = 0;
+    if (!src || !size || !readable(src, size)) return 0;
+    while (src + 4 <= end) {
+        uint32_t px = *(const uint32_t *)src, run = 1, k;
+        src += 4;
+        if (px & 0x80000000u) {
+            if (src >= end) return 0;
+            run = *src++;
+            px &= 0x7FFFFFFFu;
+        }
+        if (outn + run > LM_MAX_TEXELS) return 0;
+        for (k = 0; k < run; k++) dst[outn++] = px;
+    }
+    return outn >= count;
+}
+
+static const uint8_t *lm_entry(const uint8_t *anim, int frame, uint32_t entry)
+{
+    const uint8_t *frames = RDPTR(anim, 0x24), *fr;
+    if (frame < 0 || frame > 65535 || !readable(frames, (UINT_PTR)(frame + 1) * 4)) return NULL;
+    fr = RDPTR(frames, frame * 4);
+    if (!readable(fr, (UINT_PTR)(entry + 1) * 0x18)) return NULL;
+    return fr + entry * 0x18;
+}
+
+/* Gather the poly's lightmap into out (w*h 0x00RRGGBB). Returns 1 if lit. */
+static int lm_gather(const uint8_t *world, const uint8_t *poly, uint32_t w, uint32_t h, uint32_t *out)
+{
+    static uint32_t a[LM_MAX_TEXELS], b[LM_MAX_TEXELS];
+    const uint8_t *anims = RDPTR(world, 0x08), *refs = RDPTR(poly, 0x0C);
+    uint32_t nanim = RD32(world, 0x0C), nref = RD32(poly, 0x10), r, i, count = w * h;
+    int got = 0;
+
+    if (!nref || nref > 64 || nanim > 65535 || !readable(refs, nref * 4) ||
+        !readable(anims, (UINT_PTR)nanim * 0x60)) return 0;
+    for (r = 0; r < nref; r++) {
+        uint32_t ai = ((const uint16_t *)(refs + r * 4))[0];
+        uint32_t ei = ((const uint16_t *)(refs + r * 4))[1];
+        const uint8_t *anim, *ea, *eb;
+        int fa, fb, blend;
+        float inten;
+        if (ai >= nanim) continue;
+        anim = anims + ai * 0x60;
+        fa = (int)RD32(anim, 0x34);
+        fb = (int)RD32(anim, 0x38);
+        blend = (int)RD32(anim, 0x3C);
+        inten = *(const float *)(anim + 0x40);
+        if (fa == -1 || !(inten >= 0.02f)) continue;
+        if (RD32(anim, 0x20) != 0) continue;           /* shadow-mask light: TODO */
+        if (ei >= *(const uint16_t *)(anim + 0x30)) continue;
+        if (fa == fb || blend < 1) {
+            ea = lm_entry(anim, fa, ei);
+            if (!ea || !lm_decode(RDPTR(ea, 0), *(const uint16_t *)(ea + 4), a, count)) continue;
+        } else if (blend >= 255) {
+            ea = lm_entry(anim, fb, ei);
+            if (!ea || !lm_decode(RDPTR(ea, 0), *(const uint16_t *)(ea + 4), a, count)) continue;
+        } else {
+            ea = lm_entry(anim, fa, ei);
+            eb = lm_entry(anim, fb, ei);
+            if (!ea || !eb || !lm_decode(RDPTR(ea, 0), *(const uint16_t *)(ea + 4), a, count) ||
+                !lm_decode(RDPTR(eb, 0), *(const uint16_t *)(eb + 4), b, count)) continue;
+            for (i = 0; i < count; i++) {
+                uint32_t o = 0; int sh;
+                for (sh = 0; sh < 24; sh += 8) {
+                    int ca = (a[i] >> sh) & 0xFF, cb = (b[i] >> sh) & 0xFF;
+                    int c = ca + (((cb - ca) * blend) >> 8);
+                    o |= (uint32_t)(c < 0 ? 0 : c > 255 ? 255 : c) << sh;
+                }
+                a[i] = o;
+            }
+        }
+        if (!got) {
+            memcpy(out, a, count * 4);
+        } else {
+            uint32_t scale = inten >= 1.0f ? 256u : (uint32_t)(inten * 256.0f);
+            for (i = 0; i < count; i++) {
+                uint32_t o = 0; int sh;
+                for (sh = 0; sh < 24; sh += 8) {
+                    uint32_t c = ((out[i] >> sh) & 0xFF) + ((((a[i] >> sh) & 0xFF) * scale) >> 8);
+                    o |= (c > 255 ? 255 : c) << sh;
+                }
+                out[i] = o;
+            }
+        }
+        got = 1;
+    }
+    return got;
+}
+
+/* Gouraud polys: a light animation entry with no lightmap carries per-vertex
+ * colours as three byte arrays (entry+8/+12/+16 = B/G/R, entry+20 = count).
+ * Output is R8G8B8A8 (alpha 0 = not lightmapped). */
+static int lm_vertex_colors(const uint8_t *world, const uint8_t *poly, uint32_t nv, uint32_t *out)
+{
+    const uint8_t *anims = RDPTR(world, 0x08), *refs = RDPTR(poly, 0x0C);
+    uint32_t nanim = RD32(world, 0x0C), nref = RD32(poly, 0x10), r, k;
+    uint32_t acc[64][3];
+    int got = 0;
+
+    if (!nv || nv > 64 || !nref || nref > 64 || !readable(refs, nref * 4) ||
+        !readable(anims, (UINT_PTR)nanim * 0x60)) return 0;
+    for (r = 0; r < nref; r++) {
+        uint32_t ai = ((const uint16_t *)(refs + r * 4))[0];
+        uint32_t ei = ((const uint16_t *)(refs + r * 4))[1];
+        const uint8_t *anim, *e, *cr, *cg, *cb;
+        float inten;
+        uint32_t scale;
+        if (ai >= nanim) continue;
+        anim = anims + ai * 0x60;
+        inten = *(const float *)(anim + 0x40);
+        if ((int)RD32(anim, 0x34) == -1 || !(inten >= 0.02f) || RD32(anim, 0x20) != 0) continue;
+        if (ei >= *(const uint16_t *)(anim + 0x30)) continue;
+        e = lm_entry(anim, (int)RD32(anim, 0x34), ei);
+        if (!e || RD32(e, 20) != nv) continue;
+        cr = RDPTR(e, 8); cg = RDPTR(e, 12); cb = RDPTR(e, 16);
+        if (!readable(cr, nv) || !readable(cg, nv) || !readable(cb, nv)) continue;
+        scale = (!got || inten >= 1.0f) ? 256u : (uint32_t)(inten * 256.0f);
+        for (k = 0; k < nv; k++) {
+            uint32_t c0 = (cr[k] * scale) >> 8, c1 = (cg[k] * scale) >> 8, c2 = (cb[k] * scale) >> 8;
+            if (!got) { acc[k][0] = c0; acc[k][1] = c1; acc[k][2] = c2; }
+            else { acc[k][0] += c0; acc[k][1] += c1; acc[k][2] += c2; }
+        }
+        got = 1;
+    }
+    if (!got) return 0;
+    for (k = 0; k < nv; k++) {
+        uint32_t c0 = acc[k][0] > 255 ? 255 : acc[k][0], c1 = acc[k][1] > 255 ? 255 : acc[k][1];
+        uint32_t c2 = acc[k][2] > 255 ? 255 : acc[k][2];
+        out[k] = c2 | (c1 << 8) | (c0 << 16);   /* arrays are B, G, R */
+    }
+    return 1;
+}
+
+/* Shelf packer over LM_PAGE x LM_PAGE pages; CPU copies are uploaded at the end. */
+typedef struct LMBuild {
+    uint32_t **pix;          /* per page */
+    int npages;
+    int sx, sy, shelf_h;     /* cursor in current page */
+} LMBuild;
+
+static int lm_alloc(LMBuild *lb, int w, int h, int *page, int *x, int *y)
+{
+    if (w > LM_PAGE || h > LM_PAGE) return 0;
+    if (lb->npages && lb->sx + w > LM_PAGE) { lb->sx = 0; lb->sy += lb->shelf_h; lb->shelf_h = 0; }
+    if (!lb->npages || lb->sy + h > LM_PAGE) {
+        uint32_t **np;
+        if (lb->npages >= 16) return 0;
+        np = (uint32_t **)realloc(lb->pix, (lb->npages + 1) * sizeof *np);
+        if (!np) return 0;
+        lb->pix = np;
+        lb->pix[lb->npages] = (uint32_t *)malloc((size_t)LM_PAGE * LM_PAGE * 4);
+        if (!lb->pix[lb->npages]) return 0;
+        {   /* fill with mid grey so unlit gaps don't read as black holes */
+            size_t k;
+            for (k = 0; k < (size_t)LM_PAGE * LM_PAGE; k++) lb->pix[lb->npages][k] = 0xFF808080u;
+        }
+        lb->npages++;
+        lb->sx = lb->sy = lb->shelf_h = 0;
+    }
+    *page = lb->npages - 1; *x = lb->sx; *y = lb->sy;
+    lb->sx += w;
+    if (h > lb->shelf_h) lb->shelf_h = h;
+    return 1;
+}
+
+/* Place a w*h lightmap with a 1-texel clamped border; returns the inner origin. */
+static int lm_place(LMBuild *lb, const uint32_t *src, int w, int h, int *page, int *ox, int *oy)
+{
+    int x0, y0, x, y;
+    uint32_t *dst;
+    if (!lm_alloc(lb, w + 2, h + 2, page, &x0, &y0)) return 0;
+    dst = lb->pix[*page];
+    for (y = -1; y <= h; y++) {
+        int sy = y < 0 ? 0 : y >= h ? h - 1 : y;
+        for (x = -1; x <= w; x++) {
+            int sx = x < 0 ? 0 : x >= w ? w - 1 : x;
+            dst[(size_t)(y0 + 1 + y) * LM_PAGE + (x0 + 1 + x)] = src[sy * w + sx] | 0xFF000000u;
+        }
+    }
+    *ox = x0 + 1; *oy = y0 + 1;
+    return 1;
+}
+
+static void lm_upload(RenderContext *rc, LMBuild *lb)
+{
+    int i;
+    if (!lb->npages) return;
+    rc->lmpages = (LMPage *)calloc((size_t)lb->npages, sizeof *rc->lmpages);
+    if (rc->lmpages) rc->nlmpages = lb->npages;
+    for (i = 0; i < lb->npages; i++) {
+        D3D11_TEXTURE2D_DESC td;
+        D3D11_SUBRESOURCE_DATA init;
+        if (!rc->lmpages) break;
+        memset(&td, 0, sizeof td);
+        td.Width = td.Height = LM_PAGE;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+        init.pSysMem = lb->pix[i];
+        init.SysMemPitch = LM_PAGE * 4;
+        init.SysMemSlicePitch = 0;
+        if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, &init, &rc->lmpages[i].tex)))
+            ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)rc->lmpages[i].tex, NULL,
+                                                  &rc->lmpages[i].srv);
+    }
+    for (i = 0; i < lb->npages; i++) free(lb->pix[i]);
+    free(lb->pix);
+    lb->pix = NULL;
+    lb->npages = 0;
+}
+
+static void lm_release(RenderContext *rc)
+{
+    int i;
+    for (i = 0; i < rc->nlmpages; i++) {
+        SAFE_RELEASE(rc->lmpages[i].srv, ID3D11ShaderResourceView);
+        SAFE_RELEASE(rc->lmpages[i].tex, ID3D11Texture2D);
+    }
+    free(rc->lmpages);
+    rc->lmpages = NULL;
+    rc->nlmpages = 0;
+}
+
+typedef struct BuildTri { RTexture *tex; int lmpage; WVertex v[3]; uint32_t col[3]; } BuildTri;
 
 static int cmp_tri(const void *a, const void *b)
 {
-    uintptr_t x = (uintptr_t)((const BuildTri *)a)->tex, y = (uintptr_t)((const BuildTri *)b)->tex;
-    return x < y ? -1 : x > y;
+    const BuildTri *p = (const BuildTri *)a, *q = (const BuildTri *)b;
+    uintptr_t x = (uintptr_t)p->tex, y = (uintptr_t)q->tex;
+    if (x != y) return x < y ? -1 : 1;
+    return (p->lmpage > q->lmpage) - (p->lmpage < q->lmpage);
 }
 
 /* Surface flags (LithTech; tentative names). */
 #define SURF_INVISIBLE 0x04
 #define SURF_SKY       0x10
+#define SURF_LIGHTMAP  0x80
 
 static void build_world(RenderContext *rc)
 {
@@ -844,11 +1126,34 @@ static void build_world(RenderContext *rc)
     BuildTri *tris = NULL;
     size_t cap = 0, n = 0, i;
     WVertex *verts;
+    LMBuild lb;
+    uint32_t lit = 0, lmfail = 0, gouraud = 0;
+    double lmsum = 0;
+    float grid = 1.0f;
+    static uint32_t lmpix[LM_MAX_TEXELS];
+    memset(&lb, 0, sizeof lb);
 
     rc->built = 1;
     if (!readable(world, 0x194)) { rlog("world: bad world pointer %p", (void *)world); return; }
     list = RDPTR(world, 0x18C);
     nbsp = RD32(world, 0x190);
+    if (readable(world, 0xFC)) grid = *(const float *)(world + 0xF8);
+    if (!(grid > 0.01f && grid < 4096.0f)) grid = 16.0f;
+    rlog("world: %lu light animations, lightmap grid %d", (unsigned long)RD32(world, 0x0C), (int)grid);
+    {   /* diagnostics: dump the light animation headers */
+        const uint8_t *anims = RDPTR(world, 0x08);
+        uint32_t na = RD32(world, 0x0C), ai;
+        for (ai = 0; ai < na && ai < 8 && readable(anims, (ai + 1) * 0x60); ai++) {
+            const uint32_t *d = (const uint32_t *)(anims + ai * 0x60);
+            char nm[33]; int k;
+            for (k = 0; k < 32; k++) { char ch = ((const char *)d)[k]; nm[k] = (ch >= 32 && ch < 127) ? ch : '.'; }
+            nm[32] = 0;
+            rlog("  anim %lu: [%s] 20=%08lx 24=%08lx 28=%08lx 2c=%08lx 30=%08lx 34=%ld 38=%ld 3c=%ld 40=%d/1000",
+                 (unsigned long)ai, nm, (unsigned long)d[8], (unsigned long)d[9], (unsigned long)d[10],
+                 (unsigned long)d[11], (unsigned long)d[12], (long)d[13], (long)d[14], (long)d[15],
+                 (int)(((const float *)d)[16] * 1000));
+        }
+    }
     if (nbsp > 4096 || !readable(list, nbsp * 4)) { rlog("world: bad bsp list %p n=%lu", (void *)list, (unsigned long)nbsp); return; }
 
     for (b = 0; b < nbsp; b++) {
@@ -863,9 +1168,12 @@ static void build_world(RenderContext *rc)
         for (pi = 0; pi < np; pi++) {
             const uint8_t *poly = RDPTR(polies, pi * 4), *vlist, *surface, *v0;
             const float *plane, *p0;
-            uint32_t nv, k, rgba, sflags;
+            uint32_t nv, k, sflags;
             RTexture *tex = NULL;
             float iw = 1.0f / 64, ih = 1.0f / 64;
+            int lmpage = -1, lmx = 0, lmy = 0, have_vc = 0;
+            uint32_t vcols[64];
+            float P[3] = { 0, 0, 0 }, Q[3] = { 0, 0, 0 }, O[3] = { 0, 0, 0 };
             if (!readable(poly, 0x58)) { skipped++; continue; }
             vlist = RDPTR(poly, 0x50);
             nv = *(const uint16_t *)(poly + 0x54);
@@ -877,11 +1185,31 @@ static void build_world(RenderContext *rc)
             if (sflags & (SURF_INVISIBLE | SURF_SKY)) { hidden++; continue; }
             tex = get_texture((void *)(uintptr_t)RD32(surface, 0x2C));
             if (tex) { iw = 1.0f / (float)tex->w; ih = 1.0f / (float)tex->h; } else untextured++;
-            {   /* gentle directional term so geometry reads well before lightmaps */
-                float l = 0.55f + 0.45f * (0.5f + 0.5f * (plane[1] * 0.8f + plane[0] * 0.36f + plane[2] * 0.48f));
-                uint32_t c = (uint32_t)(l * 255);
-                rgba = 0xFF000000u | (c << 16) | (c << 8) | c;
+            if ((sflags & SURF_LIGHTMAP) && readable(poly, 0x50)) {
+                uint32_t lw = poly[0x4C], lh = poly[0x4D];
+                uint32_t axis = ((uint32_t)*(const uint16_t *)(poly + 0x14) >> 11) & 7;
+                if (lw && lh && lw * lh <= LM_MAX_TEXELS && axis < 6) {
+                    if (lm_gather(world, poly, lw, lh, lmpix) &&
+                        lm_place(&lb, lmpix, (int)lw, (int)lh, &lmpage, &lmx, &lmy)) {
+                        cross3(k_lm_ref[axis], plane, P);
+                        cross3(plane, P, Q);
+                        memcpy(O, poly + 0x38, sizeof O);
+                        {
+                            uint32_t k, sum = 0;
+                            for (k = 0; k < lw * lh; k++)
+                                sum += ((lmpix[k] >> 16) & 0xFF) + ((lmpix[k] >> 8) & 0xFF) + (lmpix[k] & 0xFF);
+                            lmsum += (double)sum / (3.0 * lw * lh);
+                        }
+                        lit++;
+                    } else {
+                        lmpage = -1;
+                        lmfail++;
+                    }
+                }
             }
+            /* Vertex colour stream: alpha 1 = lightmapped (colour unused); otherwise the
+             * gouraud light from the light animations, or mid grey if there is none. */
+            if (lmpage < 0 && (have_vc = lm_vertex_colors(world, poly, nv, vcols)) != 0) gouraud++;
             v0 = vlist;
             p0 = (const float *)RDPTR(v0, 0);
             if (!readable(p0, 12)) { skipped++; continue; }
@@ -899,13 +1227,26 @@ static void build_world(RenderContext *rc)
                 vv[1] = vlist + k * 0x18;
                 vv[2] = vlist + (k + 1) * 0x18;
                 tris[n].tex = tex;
+                tris[n].lmpage = lmpage;
+                tris[n].col[0] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[0] : 0x00808080u;
+                tris[n].col[1] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[k] : 0x00808080u;
+                tris[n].col[2] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[k + 1] : 0x00808080u;
                 for (c = 0; c < 3; c++) {
                     const float *p = (const float *)RDPTR(vv[c], 0);
                     const float *uv = (const float *)(vv[c] + 4);
                     if (!readable(p, 12)) break;
                     tris[n].v[c].x = p[0]; tris[n].v[c].y = p[1]; tris[n].v[c].z = p[2];
                     tris[n].v[c].u = uv[0] * iw; tris[n].v[c].v = uv[1] * ih;
-                    tris[n].v[c].rgba = rgba;
+                    tris[n].v[c].rgba = 0;
+                    if (lmpage >= 0) {
+                        float d0 = p[0] - O[0], d1 = p[1] - O[1], d2 = p[2] - O[2];
+                        float tu = (d0 * P[0] + d1 * P[1] + d2 * P[2]) / grid + 0.5f;
+                        float tv = (d0 * Q[0] + d1 * Q[1] + d2 * Q[2]) / grid + 0.5f;
+                        tris[n].v[c].lu = (tu + (float)lmx) / (float)LM_PAGE;
+                        tris[n].v[c].lv = (tv + (float)lmy) / (float)LM_PAGE;
+                    } else {
+                        tris[n].v[c].lu = tris[n].v[c].lv = 0;
+                    }
                 }
                 if (c == 3) n++;
             }
@@ -920,10 +1261,14 @@ static void build_world(RenderContext *rc)
         if (verts && rc->batches) {
             D3D11_BUFFER_DESC bd;
             D3D11_SUBRESOURCE_DATA init;
+            rc->vcol = (uint32_t *)malloc(n * 3 * sizeof *rc->vcol);
             for (i = 0; i < n; i++) {
                 memcpy(&verts[i * 3], tris[i].v, sizeof tris[i].v);
-                if (!rc->nbatches || rc->batches[rc->nbatches - 1].tex != tris[i].tex) {
+                if (rc->vcol) memcpy(&rc->vcol[i * 3], tris[i].col, sizeof tris[i].col);
+                if (!rc->nbatches || rc->batches[rc->nbatches - 1].tex != tris[i].tex ||
+                    rc->batches[rc->nbatches - 1].lmpage != tris[i].lmpage) {
                     rc->batches[rc->nbatches].tex = tris[i].tex;
+                    rc->batches[rc->nbatches].lmpage = tris[i].lmpage;
                     rc->batches[rc->nbatches].first = (UINT)(i * 3);
                     rc->nbatches++;
                 }
@@ -936,10 +1281,25 @@ static void build_world(RenderContext *rc)
             init.pSysMem = verts;
             init.SysMemPitch = init.SysMemSlicePitch = 0;
             if (SUCCEEDED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &rc->vb))) rc->vcount = (UINT)(n * 3);
+            memset(&bd, 0, sizeof bd);
+            bd.ByteWidth = (UINT)(n * 3 * 4);
+            bd.Usage = D3D11_USAGE_DYNAMIC;
+            bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+            init.pSysMem = rc->vcol;
+            if (!rc->vcol || FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &rc->cvb))) {
+                SAFE_RELEASE(rc->vb, ID3D11Buffer);
+                rc->vcount = 0;
+            }
         }
         free(verts);
     }
     free(tris);
+    lm_upload(rc, &lb);
+    rlog("world: %lu lightmapped polygons on %d atlas pages (%lu without lightmap data), lmscale %d%%, mean texel %d",
+         (unsigned long)lit, rc->nlmpages, (unsigned long)lmfail, (int)(g_lmscale * 100),
+         lit ? (int)(lmsum / lit) : -1);
+    rlog("world: %lu gouraud-lit polygons from light animations", (unsigned long)gouraud);
     {
         uint32_t ntex = 0;
         for (RTexture *t = g_textures; t; t = t->next) ntex++;
@@ -977,7 +1337,6 @@ static void render_world(const uint8_t *sd)
     const int32_t *rect;
     D3D11_VIEWPORT vp;
     D3D11_MAPPED_SUBRESOURCE map;
-    UINT stride = sizeof(WVertex), offset = 0;
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
 
@@ -1005,6 +1364,16 @@ static void render_world(const uint8_t *sd)
     }
 
     flush_batch();
+    {   /* live-tunable from the console */
+        static DWORD last;
+        DWORD now = GetTickCount();
+        if (now - last > 500) {
+            float sc = (float)cvar_int("avp2m_lmscale", 100) / 100.0f;
+            g_lmscale = (sc > 0.05f && sc < 8.0f) ? sc : 1.0f;
+            g_lmdebug = cvar_int("avp2m_lmdebug", 0);
+            last = now;
+        }
+    }
     quat_basis(rot, r, u, f);
     sx = 1.0f / (float)tan(xfov * 0.5);
     sy = 1.0f / (float)tan(yfov * 0.5);
@@ -1025,6 +1394,7 @@ static void render_world(const uint8_t *sd)
         float *o = (float *)map.pData;
         int i, j;
         for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) o[i * 4 + j] = m[j * 4 + i];
+        o[16] = g_lmscale; o[17] = (float)g_lmdebug; o[18] = o[19] = 0;
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb3d, 0);
     }
 
@@ -1043,21 +1413,36 @@ static void render_world(const uint8_t *sd)
     ID3D11DeviceContext_RSSetState(g_ctx, g_rast);
     ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout3d);
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &rc->vb, &stride, &offset);
+    {
+        ID3D11Buffer *vbs[2] = { rc->vb, rc->cvb };
+        UINT strides[2] = { sizeof(WVertex), 4 }, offs[2] = { 0, 0 };
+        ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 2, vbs, strides, offs);
+    }
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs3d, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
-    ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &g_samp_wrap);
+    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
+    {
+        ID3D11SamplerState *ss[2] = { g_samp_wrap, g_samp_linear };
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 2, ss);
+    }
     {
         UINT bi;
         for (bi = 0; bi < rc->nbatches; bi++) {
-            ID3D11ShaderResourceView *srv = rc->batches[bi].tex ? rc->batches[bi].tex->srv : g_white_srv;
-            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
+            ID3D11ShaderResourceView *srv[2];
+            int lp = rc->batches[bi].lmpage;
+            srv[0] = rc->batches[bi].tex ? rc->batches[bi].tex->srv : g_white_srv;
+            srv[1] = (lp >= 0 && lp < rc->nlmpages && rc->lmpages[lp].srv) ? rc->lmpages[lp].srv : g_white_srv;
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
             ID3D11DeviceContext_Draw(g_ctx, rc->batches[bi].count, rc->batches[bi].first);
         }
     }
 
     /* back to the 2D pipeline */
+    {
+        ID3D11ShaderResourceView *none[2] = { NULL, NULL };
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, none);
+    }
     g_batch_srv = NULL;
     begin_game_pass();
 }
@@ -1077,6 +1462,9 @@ static int __cdecl r_init(RenderInit *init)
     g_h = init->mode.height ? init->mode.height : 480;
     g_windowed = cvar_int("windowed", 0) == 1;
     g_vsync = cvar_int("avp2m_vsync", 1) != 0;
+    g_lmscale = (float)cvar_int("avp2m_lmscale", 100) / 100.0f;
+    if (!(g_lmscale > 0.05f && g_lmscale < 8.0f)) g_lmscale = 1.0f;
+    g_lmdebug = cvar_int("avp2m_lmdebug", 0);
     rlog("Init %lux%lu windowed=%d vsync=%d hwnd=%p", (unsigned long)g_w, (unsigned long)g_h,
          g_windowed, g_vsync, (void *)g_hwnd);
 
@@ -1382,6 +1770,9 @@ static void __cdecl r_delete_context(void *ctx)
     if (!rc) return;
     if (rc == g_cur_ctx) g_cur_ctx = NULL;
     if (rc->vb) ID3D11Buffer_Release(rc->vb);
+    lm_release(rc);
+    if (rc->cvb) ID3D11Buffer_Release(rc->cvb);
+    free(rc->vcol);
     free(rc->batches);
     free(rc);
 }

@@ -16,9 +16,10 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 **3D so far:**
 - Camera from the engine's scene description (position, quaternion, FOV, viewport)
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
+- Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
-- Lightmaps (levels are evenly lit for now), the sky, moving world models (doors), and all objects: characters, weapons, sprites, particles, and the menu's starfield
+- Animated and dynamic lights (flickering lights, muzzle flashes, flares), the sky, moving world models (doors), and all objects: characters, weapons, sprites, particles, and the menu's starfield
 - No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots
@@ -31,12 +32,14 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 
 **Don't change the resolution in the game's Graphics menu while the stock `d3d.ren` is also in the folder.** The engine lists modes from every `.ren` file, and choosing one of the stock renderer's modes switches back to it. For testing, use a copy of the game folder with `d3d.ren` renamed (e.g. to `d3d.ren.stock`).
 
-Console variables read at Init:
+Console variables:
 
 | Variable | Default | Meaning |
 |---|---|---|
 | `windowed` | 0 | 1 = window, 0 = borderless fullscreen |
 | `avp2m_vsync` | 1 | 0 disables vsync. The game is uncapped without it. |
+| `avp2m_lmscale` | 100 | Light brightness in percent (lightmaps and vertex light). Read live. |
+| `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
 It writes `avp2m_d3d11.log` next to the DLL.
 

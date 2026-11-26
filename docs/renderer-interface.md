@@ -107,18 +107,22 @@ Worked out from the stock renderer and confirmed by running our own renderer in 
 | world `+0x18C` / `+0x190` | array of BSP entries / count (294 in "Unwelcome Guests"); entry `+4` is a WorldBsp |
 | WorldBsp `+0xA0` / `+0xA4` | `WorldPoly**` / count |
 | WorldBsp `+0x88` / `+0x8C` | 0x30-byte records / count (lights, tentative) |
-| WorldPoly `+0x14` | u16 flags |
+| world `+0x08` / `+0x0C` | light animation array (0x60 bytes each) / count. See "Lighting" below |
+| world `+0xF8` | lightmap grid size in world units per texel (float; 40 in "Unwelcome Guests") |
+| WorldPoly `+0x0C` / `+0x10` | light animation refs: array of `{u16 anim, u16 entry}` / count |
+| WorldPoly `+0x14` | u16 flags; bits 11–13 select the lightmap axis frame (0–5) |
 | WorldPoly `+0x28` | plane pointer (normal xyz, dist) |
 | WorldPoly `+0x2C` | Surface pointer (surface `+0x30` = flags) |
-| WorldPoly `+0x38` | lightmap origin vector (tentative) |
+| WorldPoly `+0x38` | lightmap origin vector |
 | WorldPoly `+0x4C` / `+0x4D` | lightmap width / height in texels |
 | WorldPoly `+0x50` / `+0x54` | vertex array (0x18 bytes each, normally inline at `+0x58`) / u16 count (`+0x56`: extra clip vertices) |
 | poly vertex `+0` | pointer to position (3 floats) |
 | poly vertex `+4` / `+8` | texture u / v **in texels of mip 0** (precomputed by the engine) |
-| poly vertex `+0x14` | vertex color (ARGB) |
+| poly vertex `+0x0C` / `+0x10` | scratch: the stock renderer writes its lightmap u / v here |
+| poly vertex `+0x14` | scratch: the stock renderer writes its vertex color here. The engine does not fill it, so a replacement renderer computes vertex light itself (see "Lighting") |
 | Surface `+0x00` / `+0x0C` / `+0x18` | texture O / P / Q vectors |
 | Surface `+0x2C` | SharedTexture pointer |
-| Surface `+0x30` | flags: `0x04` invisible, `0x10` sky, `0x80` lightmapped (tentative names) |
+| Surface `+0x30` | flags: `0x04` invisible, `0x10` sky, `0x80` lightmapped |
 
 **Textures.** A SharedTexture keeps the renderer's private pointer at `+0x0C`. To get pixels, call engine callback [1] (`+0x08`) `TextureData *GetTexture(SharedTexture*, int *flag)`, upload, then callback [2] (`+0x0C`) `FreeTexture(SharedTexture*)`. Upload before freeing, because the pixel data can live in a shared scratch buffer.
 
@@ -130,6 +134,31 @@ Worked out from the stock renderer and confirmed by running our own renderer in 
 | `+0x20` | texture group |
 | `+0x22` | pixel format: 0/3 = 32-bit BGRA, 4 = DXT1, 5 = DXT3, 6 = DXT5 |
 | `+0xCC + 0x18·i` | mip i: width, height, data pointer, pitch (pitch is **0 for DXT mips**; compute it from blocks) |
+
+**Lighting.** All static world light lives in the light animations; the renderer combines it.
+
+| Light animation (0x60 bytes) | Field |
+|---|---|
+| `+0x00` | name, e.g. `LightAnim_BASE` (the static lighting), `Flicker1WaveLightFX0__LA` |
+| `+0x20` | kind: 0 = baked frames (handled), non-zero = shadow-mask point light (not yet) |
+| `+0x24` | pointer to the frame table (one pointer per frame) |
+| `+0x28` | frame count |
+| `+0x30` | u16 entries per frame |
+| `+0x34` / `+0x38` / `+0x3C` | current frame A / frame B / blend 0–255 (−1 in A = off) |
+| `+0x40` | intensity (float). The stock renderer skips anims below 0.02 |
+
+A frame is an array of 0x18-byte entries, indexed by the poly ref's `entry`:
+
+| Entry | Field |
+|---|---|
+| `+0x00` / `+0x04` | lightmap data pointer / u16 byte size (0 for gouraud polys) |
+| `+0x08` / `+0x0C` / `+0x10` | gouraud polys: per-vertex **blue / green / red** byte arrays |
+| `+0x14` | gouraud polys: vertex count |
+
+- **Lightmap data** is run-length encoded 32-bit pixels: a u32 `0x00RRGGBB`; if bit 31 is set, a u8 run length follows. At most 32×32 texels.
+- **Combining:** the first contributing anim is copied, and each further one is scaled by its intensity and added with saturation.
+- **Lightmap UVs:** let N be the poly's plane normal and R the reference vector of its axis frame (index = flags bits 11–13): (0,0,−1), (0,0,1), (0,1,0), (0,−1,0), (0,−1,0), (0,−1,0). Then P = R × N and Q = N × P (not normalized). Texel coordinates are `s = dot(pos − origin, P) / grid + 0.5` and `t = dot(pos − origin, Q) / grid + 0.5`, so texel i's center sits at i + 0.5.
+- **Polys without a lightmap** (most terrain) are gouraud-lit from the per-vertex arrays above. Texture × light, with no 2× overbright, matches the stock renderer in "Unwelcome Guests".
 
 **SceneDesc** (argument of RenderScene):
 
@@ -161,5 +190,7 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Start the D3D11 renderer against `render_struct.h`: milestone 1 (2D + presentation) works in AVP2
 - [x] Milestone 2, step 1: SceneDesc camera + world geometry (flat-shaded, all BSPs, no culling) renders in game
 - [x] Milestone 2, step 2: world textures. 566 textures (32-bit + DXT1/3/5) in 'Unwelcome Guests', 5 polygons untextured
-- [ ] Step 3: lightmaps; step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
+- [x] Step 3: static lighting. Lightmaps (3,313 polys in "Unwelcome Guests") and gouraud vertex light, both from `LightAnim_BASE`
+- [ ] Animated lights (flicker anims, shadow-mask lights); dynamic lights
+- [ ] Step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
