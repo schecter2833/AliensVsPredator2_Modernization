@@ -81,6 +81,21 @@ All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra 
 | 36 | 0x100 | `ReadConsoleVariables` | No arguments; re-reads console variables through an engine callback | `0x10012E4C` | `0x10013BCD` |
 | 37 | 0x104 | `BlitFromScreen?` | Warns when drawing a non-optimized surface | `0x1001DC81` | `0x1001E871` |
 
+## 2D contract (implemented in `avp2m_d3d11.ren`)
+
+Worked out from the stock renderer and confirmed by running our own renderer in the game:
+
+- **Init** gets the engine's window handle at offset `0x218` of the init block (after the mode record). The renderer positions and sizes the window itself, and must write the final width and height into the render struct (+0x3C/+0x40).
+- **Console variables:** engine callbacks 5, 6 and 7 are `GetConsoleVar(name)`, `GetConsoleVarFloat(var)` and `GetConsoleVarString(var)`, all cdecl. `windowed` is true when its string value is `"1"`.
+- **GetScreenFormat(PFormat\*)** receives an engine C++ object. Call its vtable[0] (`thiscall Init(type, aMask, rMask, gMask, bMask)`, where type 3 = 32-bit) and the engine fills in the shift and bit counts.
+- **Surfaces** are opaque renderer handles. The engine calls `GetSurfaceInfo(surf, &w, &h, &pitch)`, then `LockSurface(surf)` (returns the pixel pointer), writes pixels in the screen format, then calls `UnlockSurface(surf)`.
+- **OptimizeSurface(surf, key)**: a key of `0xFFFFFFFF` means opaque, and any other value is keyed to transparent.
+- **BlitToScreen(BlitRequest\*)** takes `{surface, flags, color_key, src*, dst*, alpha}`. Outside optimized-2D mode, the key applies only if flags bit 0 is set. Inside it (Start3D + StartOptimized2D), the request's key always applies, and the quad is tinted by the optimized-2D color and alpha with the current blend mode.
+- **Clear(rect\*, flags, float color[3] 0–255)** uses flag 1 for color and 2 for depth.
+- **Blend modes 0–6** (SetOptimized2DBlend): alpha, solid, add, multiply, multiply×2, mask, mask-add. The table is in `render_struct.h`.
+- **The menu background is 3D:** menu frames call `RenderScene` before drawing text. The legal/splash screen is a single CPU-composited 640×480 surface.
+- **Video playback** uses `GetHook("LPDIRECTDRAW")` and `GetHook("BACKBUFFER")`. Returning NULL makes the engine skip videos without crashing.
+
 ## Next steps
 
 - [x] Map the slot layout in both builds
@@ -89,4 +104,6 @@ All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra 
 - [x] Confirm slots 2, 3, 5, 6, 33 from traces
 - [ ] Slots never seen at runtime yet: 4, 13, 15, 17, 19, 22, 30, 31, 32, 34, 35 (screenshot, console commands, alt paths)
 - [ ] Map the 14 engine callbacks
-- [ ] Start the D3D11 renderer against `render_struct.h`
+- [x] Start the D3D11 renderer against `render_struct.h`: milestone 1 (2D + presentation) works in AVP2
+- [ ] Milestone 2: `RenderScene`, i.e. the world, models, sprites and effects (requires mapping `SceneDesc` and the engine's world/model data)
+- [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

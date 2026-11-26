@@ -2,7 +2,7 @@
 
 A community project to modernize **Aliens versus Predator 2** (Monolith, 2001) and its expansion **Primal Hunt** (Third Law, 2002) for current PCs. We do this by reverse-engineering and replacing the LithTech Talon engine one piece at a time, without breaking compatibility with the existing 1.0.9.6 multiplayer community.
 
-> **Status: early research.** The renderer interface is mapped for both games and confirmed at runtime: AVP2 runs menus, cutscenes and gameplay through our logging proxy renderer ([runtime findings](docs/runtime-findings.md)). There's no visual improvement yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
+> **Status: renderer milestone 1.** Our own Direct3D 11 renderer runs AVP2's menus and in-game HUD, with correct window placement and borderless fullscreen. The 3D world isn't drawn yet (milestone 2), so it's **not playable yet**. See [src/renderer/d3d11](src/renderer/d3d11/README.md) and [runtime findings](docs/runtime-findings.md). See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
 
 ## Goals
 
@@ -27,7 +27,8 @@ This repository contains **no game files**: no executables, DLLs, `.rez` archive
 | Path | Contents |
 |---|---|
 | `tools/` | Research utilities (REZ extractor, PE inventory, REA renderer-slot comparison) |
-| `src/renderer/` | Renderer interface header; replacement for `d3d.ren` (planned) |
+| `src/renderer/` | Renderer interface header (`render_struct.h`) |
+| `src/renderer/d3d11/` | `avp2m_d3d11.ren`: Direct3D 11 renderer (milestone 1: 2D + presentation) |
 | `src/trace/` | `avp2m_trace.ren`: logging proxy renderer for both games |
 | `tests/` | Self-tests (fake engine + fake renderer) |
 | `cmake/` | MinGW-w64 i686 toolchain file |

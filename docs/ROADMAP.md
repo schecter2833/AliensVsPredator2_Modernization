@@ -24,10 +24,14 @@ Client-side only, so no effect on multiplayer.
 - [ ] Survive repeated Term/unload/reload on focus loss; make alt-tab painless
 - [ ] Own window placement in windowed mode (stock engine puts the window mostly off-screen on wide displays)
 - [x] Reverse `GetSupportedModes` / `FreeModeList` and how the engine enumerates `*.ren`
-- [ ] Direct3D 11 backend (Vulkan later, or via DXVK)
-- [ ] Native widescreen and Hor+ FOV, arbitrary resolutions, high refresh rates
+- [x] **Milestone 1:** Direct3D 11 renderer drawing all 2D (menus, HUD, fonts, fades), with vsync and correct window placement (`src/renderer/d3d11`)
+- [ ] **Milestone 2:** 3D world in D3D11 (`RenderScene`: world geometry, lightmaps, models, sprites, particles, effects)
+- [ ] Video playback (the engine asks for DirectDraw hooks)
+- [ ] Native widescreen and Hor+ FOV. Note: the game's menu only offers 4:3 modes (filter in `CShell.DLL`), so widescreen needs camera FOV help from the hook layer
+- [ ] Arbitrary resolutions, high refresh rates
 - [ ] Correct HUD/menu scaling at 16:9 and 21:9
-- [ ] Gamma that doesn't change the desktop, borderless windowed mode, alt-tab
+- [x] Borderless fullscreen with aspect-correct scaling; window centered correctly on wide displays
+- [ ] Gamma that doesn't change the desktop; smoother alt-tab
 
 ## Phase 2: Engine hook layer
 An injected DLL that patches `lithtech.exe` at runtime. The files on disk are never touched.

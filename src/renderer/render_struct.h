@@ -45,6 +45,7 @@ typedef struct RenderMode {
 typedef struct RenderInit {
     uint32_t   version;             /* 0x000 out: AVP2M_RENDER_VERSION     */
     RenderMode mode;                /* 0x004 in: requested display mode    */
+    void      *main_window;         /* 0x218 in: engine's HWND             */
 } RenderInit;
 
 /* ------------------------------------------------------------------ */
@@ -99,6 +100,56 @@ enum RenderSlot {
 
 #define RS_ENGINE_CALLBACK_COUNT 14
 
+/* Engine callbacks used by the stock renderer (all __cdecl):
+ *   [5] +0x18  void *GetConsoleVar(const char *name)  -> handle or NULL
+ *   [6] +0x1C  float GetConsoleVarFloat(void *var)
+ *   [7] +0x20  const char *GetConsoleVarString(void *var)
+ * The rest are not mapped yet. */
+#define RS_CB_GET_CONSOLE_VAR        5
+#define RS_CB_GET_CONSOLE_VAR_FLOAT  6
+#define RS_CB_GET_CONSOLE_VAR_STRING 7
+
+/* ------------------------------------------------------------------ */
+/* 2D interface                                                         */
+/* ------------------------------------------------------------------ */
+typedef struct LTRect { int32_t left, top, right, bottom; } LTRect;
+
+/* Argument of BlitToScreen. */
+typedef struct BlitRequest {
+    void     *surface;       /* 0x00 surface handle from CreateSurface      */
+    uint32_t  flags;         /* 0x04 bit 0: use color key                   */
+    uint32_t  color_key;     /* 0x08 in screen pixel format; -1 = none       */
+    LTRect   *src;           /* 0x0C source rectangle                       */
+    LTRect   *dst;           /* 0x10 destination rectangle                  */
+    float     alpha;         /* 0x14 0..1, used in optimized 2D mode        */
+} BlitRequest;
+#define BLIT_FLAG_COLORKEY 1u
+#define COLORKEY_NONE      0xFFFFFFFFu
+
+/* Clear(rect, flags, color): rect NULL = whole screen; color is three
+ * floats in 0..255 (NULL = black). */
+#define CLEAR_SCREEN 1u
+#define CLEAR_DEPTH  2u
+
+/* Optimized-2D blend modes (SetOptimized2DBlend). */
+enum Opt2DBlend {
+    OPT2D_ALPHA = 0,      /* src*a + dst*(1-a)      */
+    OPT2D_SOLID,          /* src, no blending       */
+    OPT2D_ADD,            /* src + dst              */
+    OPT2D_MULTIPLY,       /* src*dst                */
+    OPT2D_MULTIPLY2,      /* src*dst + dst*src      */
+    OPT2D_MASK,           /* dst*(1-src)            */
+    OPT2D_MASKADD,        /* src + dst*(1-src)      */
+    OPT2D_BLEND_COUNT
+};
+
+/* Engine-owned pixel-format object passed to GetScreenFormat. It's a C++
+ * object: vtable at +0, whose first entry is
+ *   void __thiscall Init(int bpp_type, uint32_t a, uint32_t r, uint32_t g, uint32_t b)
+ * bpp_type: 2 = 16-bit, 3 = 32-bit. */
+#define PFORMAT_BPP_16 2
+#define PFORMAT_BPP_32 3
+
 typedef struct RenderStruct {
     uint32_t engine_0x00;                                   /* 0x00 */
     AVP2M_Fn engine_callbacks[RS_ENGINE_CALLBACK_COUNT];    /* 0x04-0x38 */
@@ -111,7 +162,7 @@ typedef struct RenderStruct {
 
 /* Compile-time layout checks */
 typedef char avp2m_check_mode_size [(sizeof(RenderMode)  == 0x214) ? 1 : -1];
-typedef char avp2m_check_init_size [(sizeof(RenderInit)  == 0x218) ? 1 : -1];
+typedef char avp2m_check_init_size [(sizeof(RenderInit)  == 0x21C) ? 1 : -1];
 typedef char avp2m_check_slots_off [(sizeof(RenderStruct) == 0x108) ? 1 : -1];
 
 /* Renderer DLL exports (all __cdecl) */

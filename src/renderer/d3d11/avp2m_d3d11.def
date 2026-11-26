@@ -1,0 +1,5 @@
+LIBRARY avp2m_d3d11.ren
+EXPORTS
+    RenderDLLSetup
+    GetSupportedModes
+    FreeModeList
