@@ -2,7 +2,7 @@
 
 A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), written against the interface in [`../render_struct.h`](../render_struct.h). It works with both AVP2 1.0.9.6 and Primal Hunt, which share the interface.
 
-## Status: milestone 1 (2D and presentation)
+## Status: milestone 1 done, milestone 2 (3D) in progress
 
 **Works**, tested in AVP2 1.0.9.6 on Windows 11:
 - Direct3D 11 device and swap chain (flip model, falling back to the older blt model), with vsync
@@ -13,8 +13,13 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - Display-mode list from DXGI (every mode the monitor supports, plus the classic 4:3 modes)
 - Survives the engine's unload/reload of the renderer on every focus loss
 
+**3D so far:**
+- Camera from the engine's scene description (position, quaternion, FOV, viewport)
+- All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
+
 **Not yet:**
-- **The 3D world (`RenderScene`) draws nothing**, so levels and the menu's starfield background are black. That's milestone 2.
+- Lightmaps (levels are evenly lit for now), the sky, moving world models (doors), and all objects: characters, weapons, sprites, particles, and the menu's starfield
+- No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots
 

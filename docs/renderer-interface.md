@@ -114,6 +114,22 @@ Worked out from the stock renderer and confirmed by running our own renderer in 
 | WorldPoly `+0x4C` / `+0x4D` | lightmap width / height in texels |
 | WorldPoly `+0x50` / `+0x54` | vertex array (0x18 bytes each, normally inline at `+0x58`) / u16 count (`+0x56`: extra clip vertices) |
 | poly vertex `+0` | pointer to position (3 floats) |
+| poly vertex `+4` / `+8` | texture u / v **in texels of mip 0** (precomputed by the engine) |
+| poly vertex `+0x14` | vertex color (ARGB) |
+| Surface `+0x00` / `+0x0C` / `+0x18` | texture O / P / Q vectors |
+| Surface `+0x2C` | SharedTexture pointer |
+| Surface `+0x30` | flags: `0x04` invisible, `0x10` sky, `0x80` lightmapped (tentative names) |
+
+**Textures.** A SharedTexture keeps the renderer's private pointer at `+0x0C`. To get pixels, call engine callback [1] (`+0x08`) `TextureData *GetTexture(SharedTexture*, int *flag)`, upload, then callback [2] (`+0x0C`) `FreeTexture(SharedTexture*)`. Upload before freeing, because the pixel data can live in a shared scratch buffer.
+
+| TextureData | Field |
+|---|---|
+| `+0x08` | DTX header starts (public DTX format) |
+| `+0x14` | u16 mip count |
+| `+0x18` | DTX flags |
+| `+0x20` | texture group |
+| `+0x22` | pixel format: 0/3 = 32-bit BGRA, 4 = DXT1, 5 = DXT3, 6 = DXT5 |
+| `+0xCC + 0x18·i` | mip i: width, height, data pointer, pitch (pitch is **0 for DXT mips**; compute it from blocks) |
 
 **SceneDesc** (argument of RenderScene):
 
@@ -144,6 +160,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [ ] Map the 14 engine callbacks
 - [x] Start the D3D11 renderer against `render_struct.h`: milestone 1 (2D + presentation) works in AVP2
 - [x] Milestone 2, step 1: SceneDesc camera + world geometry (flat-shaded, all BSPs, no culling) renders in game
-- [ ] Milestone 2, step 2: world textures (surface texture + UV mapping, texture upload via BindTexture)
+- [x] Milestone 2, step 2: world textures. 566 textures (32-bit + DXT1/3/5) in 'Unwelcome Guests', 5 polygons untextured
 - [ ] Step 3: lightmaps; step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

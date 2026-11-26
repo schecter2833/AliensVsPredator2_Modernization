@@ -92,7 +92,7 @@ static ID3D11PixelShader  *g_ps;
 static ID3D11InputLayout  *g_layout;
 static ID3D11Buffer       *g_vb;
 static ID3D11Buffer       *g_cb;
-static ID3D11SamplerState *g_samp_point, *g_samp_linear;
+static ID3D11SamplerState *g_samp_point, *g_samp_linear, *g_samp_wrap;
 static ID3D11BlendState   *g_blend[OPT2D_BLEND_COUNT];
 static ID3D11RasterizerState *g_rast;
 static ID3D11Texture2D *g_white_tex;
@@ -103,11 +103,26 @@ static UINT g_vb_pos;                          /* in vertices */
 static Surface g_surfaces = { 0 };             /* list head   */
 
 /* 3D world (milestone 2, step 1: untextured geometry) */
-typedef struct WVertex { float x, y, z; uint32_t rgba; } WVertex;
+typedef struct WVertex { float x, y, z, u, v; uint32_t rgba; } WVertex;
+
+/* Renderer-side texture, created from engine TextureData. Its pointer is
+ * stored in SharedTexture+0x0C, like the stock renderer does. */
+typedef struct RTexture {
+    ID3D11Texture2D *tex;
+    ID3D11ShaderResourceView *srv;
+    uint32_t w, h;
+    void *shared;                    /* engine SharedTexture */
+    struct RTexture *next;
+} RTexture;
+static RTexture *g_textures;
+
+typedef struct DrawBatch { RTexture *tex; UINT first, count; } DrawBatch;
 typedef struct RenderContext {
     void *world;                     /* engine world (first field of the init block) */
     ID3D11Buffer *vb;
     UINT vcount;
+    DrawBatch *batches;
+    UINT nbatches;
     int built;
 } RenderContext;
 static RenderContext *g_cur_ctx;
@@ -150,10 +165,11 @@ static int cvar_int(const char *name, int def)
 /* ------------------------------------------------------------------ */
 static const char k_hlsl3d[] =
     "cbuffer C : register(b0) { float4x4 vp; };\n"
-    "struct VI { float3 p : POSITION; float4 c : COLOR; };\n"
-    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
-    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.c = i.c; return o; }\n"
-    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+    "struct VI { float3 p : POSITION; float2 uv : TEXCOORD; float4 c : COLOR; };\n"
+    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.uv = i.uv; o.c = i.c; return o; }\n"
+    "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5); return float4(c.rgb * i.c.rgb, 1); }\n";
 
 static const char k_hlsl[] =
     "cbuffer C : register(b0) { float4 xf; };\n"
@@ -199,9 +215,10 @@ static int create_shaders(void)
     if (FAILED(hr)) return 0;
 
     {
-        D3D11_INPUT_ELEMENT_DESC il3[2] = {
+        D3D11_INPUT_ELEMENT_DESC il3[3] = {
             { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
-            { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT,    0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 20, D3D11_INPUT_PER_VERTEX_DATA, 0 },
         };
         vsb = psb = err = NULL;
         hr = compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "vs", "vs_4_0", 0, 0, &vsb, &err);
@@ -209,7 +226,7 @@ static int create_shaders(void)
         if (FAILED(hr)) { rlog("3D shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?"); return 0; }
         hr = ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), NULL, &g_vs3d);
         if (SUCCEEDED(hr)) hr = ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(psb), ID3D10Blob_GetBufferSize(psb), NULL, &g_ps3d);
-        if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 2, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
+        if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 3, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
         ID3D10Blob_Release(vsb);
         ID3D10Blob_Release(psb);
     }
@@ -286,6 +303,10 @@ static int create_objects(void)
     ID3D11Device_CreateSamplerState(g_dev, &sd, &g_samp_point);
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
     ID3D11Device_CreateSamplerState(g_dev, &sd, &g_samp_linear);
+    sd.Filter = D3D11_FILTER_ANISOTROPIC;
+    sd.MaxAnisotropy = 8;
+    sd.AddressU = sd.AddressV = sd.AddressW = D3D11_TEXTURE_ADDRESS_WRAP;
+    ID3D11Device_CreateSamplerState(g_dev, &sd, &g_samp_wrap);
 
     memset(&rd, 0, sizeof rd);
     rd.FillMode = D3D11_FILL_SOLID;
@@ -432,6 +453,7 @@ static void release_surface_textures(void)
     }
 }
 
+static void release_all_textures(void);
 static void release_device(void)
 {
     int i;
@@ -443,12 +465,20 @@ static void release_device(void)
     SAFE_RELEASE(g_rast, ID3D11RasterizerState);
     SAFE_RELEASE(g_samp_point, ID3D11SamplerState);
     SAFE_RELEASE(g_samp_linear, ID3D11SamplerState);
+    SAFE_RELEASE(g_samp_wrap, ID3D11SamplerState);
     SAFE_RELEASE(g_cb, ID3D11Buffer);
     SAFE_RELEASE(g_vb, ID3D11Buffer);
     SAFE_RELEASE(g_layout, ID3D11InputLayout);
     SAFE_RELEASE(g_ps, ID3D11PixelShader);
     SAFE_RELEASE(g_vs, ID3D11VertexShader);
-    if (g_cur_ctx) { SAFE_RELEASE(g_cur_ctx->vb, ID3D11Buffer); g_cur_ctx->built = 0; }
+    if (g_cur_ctx) {
+        SAFE_RELEASE(g_cur_ctx->vb, ID3D11Buffer);
+        free(g_cur_ctx->batches);
+        g_cur_ctx->batches = NULL;
+        g_cur_ctx->nbatches = 0;
+        g_cur_ctx->built = 0;
+    }
+    release_all_textures();
     SAFE_RELEASE(g_dsv, ID3D11DepthStencilView);
     SAFE_RELEASE(g_depth_tex, ID3D11Texture2D);
     SAFE_RELEASE(g_ds_on, ID3D11DepthStencilState);
@@ -655,25 +685,165 @@ static int readable(const void *p, UINT_PTR n)
 #define RD32(base, off) (*(const uint32_t *)((const uint8_t *)(base) + (off)))
 #define RDPTR(base, off) ((const uint8_t *)(uintptr_t)RD32(base, off))
 
-static uint32_t shade(const float *n, const void *surface)
+
+
+/* ------------------------------------------------------------------ */
+/* Textures                                                             */
+/* SharedTexture+0x0C: renderer data. Engine callbacks:                 */
+/*   [1] +0x08 TextureData *GetTexture(SharedTexture*, int *flag)       */
+/*   [2] +0x0C void FreeTexture(SharedTexture*)                         */
+/* TextureData: +0x14 u16 mip count, +0x22 u8 format (0/3 = 32-bit,     */
+/*   4/5/6 = DXT1/3/5), mips from +0xCC, 0x18 bytes each:               */
+/*   width, height, data*, pitch.                                       */
+/* ------------------------------------------------------------------ */
+typedef void *(__cdecl *PFN_GetTexture)(void *shared, int *flag);
+typedef void (__cdecl *PFN_FreeTexture)(void *shared);
+
+static RTexture *create_texture(void *shared)
 {
-    /* Flat shading by normal with a fixed light; tinted per surface so
-     * different surfaces are distinguishable. */
-    float l = 0.35f + 0.65f * (0.5f + 0.5f * (n[1] * 0.8f + n[0] * 0.36f + n[2] * 0.48f));
-    uint32_t h = (uint32_t)(uintptr_t)surface * 2654435761u;
-    float r = l * (0.75f + 0.25f * ((h >> 8) & 0xFF) / 255.0f);
-    float g = l * (0.75f + 0.25f * ((h >> 16) & 0xFF) / 255.0f);
-    float b = l * (0.75f + 0.25f * ((h >> 24) & 0xFF) / 255.0f);
-    return 0xFF000000u | ((uint32_t)(b * 255) << 16) | ((uint32_t)(g * 255) << 8) | (uint32_t)(r * 255);
+    const uint8_t *td;
+    int flag = 0;
+    uint32_t fmt, nmips, w, h, i;
+    DXGI_FORMAT dxfmt;
+    D3D11_TEXTURE2D_DESC desc;
+    D3D11_SUBRESOURCE_DATA init[16];
+    RTexture *rt = NULL;
+
+    if (!g_dev || !readable(shared, 0x10)) return NULL;
+    td = (const uint8_t *)((PFN_GetTexture)(void *)g_rs->engine_callbacks[1])(shared, &flag);
+    if (!readable(td, 0xCC + 0x18)) {
+        static int w1;
+        if (w1++ < 5) rlog("texture %p: GetTexture returned %p (flag %d)", shared, (void *)td, flag);
+        goto done;
+    }
+    nmips = *(const uint16_t *)(td + 0x14);
+    fmt = td[0x22];
+    if (fmt == 0) fmt = 3;
+    switch (fmt) {
+    case 3: dxfmt = DXGI_FORMAT_B8G8R8A8_UNORM; break;
+    case 4: dxfmt = DXGI_FORMAT_BC1_UNORM; break;
+    case 5: dxfmt = DXGI_FORMAT_BC2_UNORM; break;
+    case 6: dxfmt = DXGI_FORMAT_BC3_UNORM; break;
+    default: {
+        static int warned;
+        if (warned++ < 5) rlog("texture %p: unsupported format %lu", shared, (unsigned long)fmt);
+        goto done;
+    }
+    }
+    w = RD32(td, 0xCC);
+    h = RD32(td, 0xD0);
+    if (nmips < 1 || nmips > 16 || w < 1 || h < 1 || w > 4096 || h > 4096) {
+        static int w2;
+        if (w2++ < 5) rlog("texture %p: bad header nmips=%lu w=%lu h=%lu fmt=%lu", shared,
+                           (unsigned long)nmips, (unsigned long)w, (unsigned long)h, (unsigned long)fmt);
+        goto done;
+    }
+    if (fmt != 3 && ((w & 3) || (h & 3))) nmips = 1;     /* BC needs 4x4 blocks */
+    for (i = 0; i < nmips; i++) {
+        const uint8_t *m = td + 0xCC + i * 0x18;
+        uint32_t mw = RD32(m, 0), mh = RD32(m, 4), pitch = RD32(m, 12);
+        const void *data = (const void *)(uintptr_t)RD32(m, 8);
+        uint32_t rows = fmt == 3 ? mh : (mh + 3) / 4;
+        /* The engine leaves pitch at 0 for block-compressed mips. */
+        if (fmt != 3) pitch = ((mw + 3) / 4) * (fmt == 4 ? 8u : 16u);
+        else if (!pitch) pitch = mw * 4;
+        if (mw != (w >> i ? w >> i : 1) || mh != (h >> i ? h >> i : 1)) break;
+        if (fmt != 3 && ((mw & 3) || (mh & 3))) break;
+        if (!pitch || !readable(data, (UINT_PTR)pitch * rows)) break;
+        init[i].pSysMem = data;
+        init[i].SysMemPitch = pitch;
+        init[i].SysMemSlicePitch = 0;
+    }
+    if (i == 0) {
+        static int w3;
+        if (w3++ < 8) rlog("texture %p: mip0 rejected w=%lu h=%lu fmt=%lu pitch=%lu data=%08lX m0=%lu,%lu",
+                           shared, (unsigned long)w, (unsigned long)h, (unsigned long)fmt,
+                           (unsigned long)RD32(td, 0xCC + 12), (unsigned long)RD32(td, 0xCC + 8),
+                           (unsigned long)RD32(td, 0xCC), (unsigned long)RD32(td, 0xD0));
+        goto done;
+    }
+    memset(&desc, 0, sizeof desc);
+    desc.Width = w;
+    desc.Height = h;
+    desc.MipLevels = i;
+    desc.ArraySize = 1;
+    desc.Format = dxfmt;
+    desc.SampleDesc.Count = 1;
+    desc.Usage = D3D11_USAGE_IMMUTABLE;
+    desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+    rt = (RTexture *)calloc(1, sizeof *rt);
+    if (!rt) goto done;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &desc, init, &rt->tex)) ||
+        FAILED(ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)rt->tex, NULL, &rt->srv))) {
+        static int w4;
+        if (w4++ < 5) rlog("texture %p: CreateTexture2D failed %lux%lu fmt=%lu mips=%lu", shared,
+                           (unsigned long)w, (unsigned long)h, (unsigned long)fmt, (unsigned long)i);
+        if (rt->tex) ID3D11Texture2D_Release(rt->tex);
+        free(rt);
+        rt = NULL;
+        goto done;
+    }
+    rt->w = w;
+    rt->h = h;
+    rt->shared = shared;
+    rt->next = g_textures;
+    g_textures = rt;
+    *(void **)((uint8_t *)shared + 0x0C) = rt;
+done:
+    if (td) ((PFN_FreeTexture)(void *)g_rs->engine_callbacks[2])(shared);
+    return rt;
 }
+
+static RTexture *get_texture(void *shared)
+{
+    RTexture *rt;
+    if (!readable(shared, 0x10)) return NULL;
+    rt = (RTexture *)(uintptr_t)RD32(shared, 0x0C);
+    for (RTexture *t = g_textures; t; t = t->next) if (t == rt) return rt;   /* ours and alive */
+    return create_texture(shared);
+}
+
+static void release_texture(RTexture *rt)
+{
+    RTexture **pp;
+    for (pp = &g_textures; *pp; pp = &(*pp)->next) {
+        if (*pp == rt) {
+            *pp = rt->next;
+            if (readable(rt->shared, 0x10) && RD32(rt->shared, 0x0C) == (uint32_t)(uintptr_t)rt)
+                *(void **)((uint8_t *)rt->shared + 0x0C) = NULL;
+            if (rt->srv) ID3D11ShaderResourceView_Release(rt->srv);
+            if (rt->tex) ID3D11Texture2D_Release(rt->tex);
+            free(rt);
+            return;
+        }
+    }
+}
+
+static void release_all_textures(void)
+{
+    while (g_textures) release_texture(g_textures);
+}
+
+typedef struct BuildTri { RTexture *tex; WVertex v[3]; } BuildTri;
+
+static int cmp_tri(const void *a, const void *b)
+{
+    uintptr_t x = (uintptr_t)((const BuildTri *)a)->tex, y = (uintptr_t)((const BuildTri *)b)->tex;
+    return x < y ? -1 : x > y;
+}
+
+/* Surface flags (LithTech; tentative names). */
+#define SURF_INVISIBLE 0x04
+#define SURF_SKY       0x10
 
 static void build_world(RenderContext *rc)
 {
     const uint8_t *world = (const uint8_t *)rc->world;
     const uint8_t *list;
-    uint32_t nbsp, b, total_polys = 0, skipped = 0;
-    WVertex *verts = NULL;
-    size_t cap = 0, n = 0;
+    uint32_t nbsp, b, total_polys = 0, skipped = 0, hidden = 0, untextured = 0;
+    BuildTri *tris = NULL;
+    size_t cap = 0, n = 0, i;
+    WVertex *verts;
 
     rc->built = 1;
     if (!readable(world, 0x194)) { rlog("world: bad world pointer %p", (void *)world); return; }
@@ -683,60 +853,101 @@ static void build_world(RenderContext *rc)
 
     for (b = 0; b < nbsp; b++) {
         const uint8_t *entry = RDPTR(list, b * 4), *bsp, *polies;
-        uint32_t np, i;
+        uint32_t np, pi;
         if (!readable(entry, 8)) continue;
         bsp = RDPTR(entry, 4);
         if (!readable(bsp, 0xA8)) continue;
         polies = RDPTR(bsp, 0xA0);
         np = RD32(bsp, 0xA4);
         if (np > 2000000 || !readable(polies, np * 4)) { skipped++; continue; }
-        for (i = 0; i < np; i++) {
-            const uint8_t *poly = RDPTR(polies, i * 4), *vlist, *surface;
-            const float *plane;
-            uint32_t nv, k, rgba;
-            const float *p0;
+        for (pi = 0; pi < np; pi++) {
+            const uint8_t *poly = RDPTR(polies, pi * 4), *vlist, *surface, *v0;
+            const float *plane, *p0;
+            uint32_t nv, k, rgba, sflags;
+            RTexture *tex = NULL;
+            float iw = 1.0f / 64, ih = 1.0f / 64;
             if (!readable(poly, 0x58)) { skipped++; continue; }
             vlist = RDPTR(poly, 0x50);
             nv = *(const uint16_t *)(poly + 0x54);
             plane = (const float *)RDPTR(poly, 0x28);
             surface = RDPTR(poly, 0x2C);
-            if (nv < 3 || nv > 64 || !readable(vlist, nv * 0x18) || !readable(plane, 12)) { skipped++; continue; }
-            rgba = shade(plane, surface);
-            p0 = (const float *)RDPTR(vlist, 0);
+            if (nv < 3 || nv > 64 || !readable(vlist, nv * 0x18) || !readable(plane, 12) ||
+                !readable(surface, 0x34)) { skipped++; continue; }
+            sflags = RD32(surface, 0x30);
+            if (sflags & (SURF_INVISIBLE | SURF_SKY)) { hidden++; continue; }
+            tex = get_texture((void *)(uintptr_t)RD32(surface, 0x2C));
+            if (tex) { iw = 1.0f / (float)tex->w; ih = 1.0f / (float)tex->h; } else untextured++;
+            {   /* gentle directional term so geometry reads well before lightmaps */
+                float l = 0.55f + 0.45f * (0.5f + 0.5f * (plane[1] * 0.8f + plane[0] * 0.36f + plane[2] * 0.48f));
+                uint32_t c = (uint32_t)(l * 255);
+                rgba = 0xFF000000u | (c << 16) | (c << 8) | c;
+            }
+            v0 = vlist;
+            p0 = (const float *)RDPTR(v0, 0);
             if (!readable(p0, 12)) { skipped++; continue; }
-            if (n + (nv - 2) * 3 > cap) {
-                size_t ncap = cap ? cap * 2 : 65536;
-                while (ncap < n + (nv - 2) * 3) ncap *= 2;
-                verts = (WVertex *)realloc(verts, ncap * sizeof *verts);
-                if (!verts) { rlog("world: out of memory"); return; }
+            if (n + (nv - 2) > cap) {
+                size_t ncap = cap ? cap * 2 : 32768;
+                while (ncap < n + (nv - 2)) ncap *= 2;
+                tris = (BuildTri *)realloc(tris, ncap * sizeof *tris);
+                if (!tris) { rlog("world: out of memory"); return; }
                 cap = ncap;
             }
             for (k = 1; k + 1 < nv; k++) {
-                const float *p1 = (const float *)RDPTR(vlist, k * 0x18);
-                const float *p2 = (const float *)RDPTR(vlist, (k + 1) * 0x18);
-                if (!readable(p1, 12) || !readable(p2, 12)) break;
-                verts[n].x = p0[0]; verts[n].y = p0[1]; verts[n].z = p0[2]; verts[n].rgba = rgba; n++;
-                verts[n].x = p1[0]; verts[n].y = p1[1]; verts[n].z = p1[2]; verts[n].rgba = rgba; n++;
-                verts[n].x = p2[0]; verts[n].y = p2[1]; verts[n].z = p2[2]; verts[n].rgba = rgba; n++;
+                const uint8_t *vv[3];
+                int c;
+                vv[0] = v0;
+                vv[1] = vlist + k * 0x18;
+                vv[2] = vlist + (k + 1) * 0x18;
+                tris[n].tex = tex;
+                for (c = 0; c < 3; c++) {
+                    const float *p = (const float *)RDPTR(vv[c], 0);
+                    const float *uv = (const float *)(vv[c] + 4);
+                    if (!readable(p, 12)) break;
+                    tris[n].v[c].x = p[0]; tris[n].v[c].y = p[1]; tris[n].v[c].z = p[2];
+                    tris[n].v[c].u = uv[0] * iw; tris[n].v[c].v = uv[1] * ih;
+                    tris[n].v[c].rgba = rgba;
+                }
+                if (c == 3) n++;
             }
             total_polys++;
         }
     }
 
     if (n) {
-        D3D11_BUFFER_DESC bd;
-        D3D11_SUBRESOURCE_DATA init;
-        memset(&bd, 0, sizeof bd);
-        bd.ByteWidth = (UINT)(n * sizeof(WVertex));
-        bd.Usage = D3D11_USAGE_IMMUTABLE;
-        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        init.pSysMem = verts;
-        init.SysMemPitch = init.SysMemSlicePitch = 0;
-        if (SUCCEEDED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &rc->vb))) rc->vcount = (UINT)n;
+        qsort(tris, n, sizeof *tris, cmp_tri);
+        verts = (WVertex *)malloc(n * 3 * sizeof *verts);
+        rc->batches = (DrawBatch *)calloc(n, sizeof *rc->batches);
+        if (verts && rc->batches) {
+            D3D11_BUFFER_DESC bd;
+            D3D11_SUBRESOURCE_DATA init;
+            for (i = 0; i < n; i++) {
+                memcpy(&verts[i * 3], tris[i].v, sizeof tris[i].v);
+                if (!rc->nbatches || rc->batches[rc->nbatches - 1].tex != tris[i].tex) {
+                    rc->batches[rc->nbatches].tex = tris[i].tex;
+                    rc->batches[rc->nbatches].first = (UINT)(i * 3);
+                    rc->nbatches++;
+                }
+                rc->batches[rc->nbatches - 1].count += 3;
+            }
+            memset(&bd, 0, sizeof bd);
+            bd.ByteWidth = (UINT)(n * 3 * sizeof(WVertex));
+            bd.Usage = D3D11_USAGE_IMMUTABLE;
+            bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+            init.pSysMem = verts;
+            init.SysMemPitch = init.SysMemSlicePitch = 0;
+            if (SUCCEEDED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &rc->vb))) rc->vcount = (UINT)(n * 3);
+        }
+        free(verts);
     }
-    free(verts);
-    rlog("world: %lu bsps, %lu polygons -> %lu triangles (%lu skipped)", (unsigned long)nbsp,
-         (unsigned long)total_polys, (unsigned long)(n / 3), (unsigned long)skipped);
+    free(tris);
+    {
+        uint32_t ntex = 0;
+        for (RTexture *t = g_textures; t; t = t->next) ntex++;
+        rlog("world: %lu bsps, %lu polygons -> %lu triangles in %lu batches, %lu textures "
+             "(%lu hidden, %lu untextured, %lu skipped)", (unsigned long)nbsp, (unsigned long)total_polys,
+             (unsigned long)n, (unsigned long)rc->nbatches, (unsigned long)ntex,
+             (unsigned long)hidden, (unsigned long)untextured, (unsigned long)skipped);
+    }
 }
 
 /* SceneDesc fields used so far (dword offsets into the engine's struct). */
@@ -836,7 +1047,15 @@ static void render_world(const uint8_t *sd)
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs3d, NULL, 0);
     ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
-    ID3D11DeviceContext_Draw(g_ctx, rc->vcount, 0);
+    ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &g_samp_wrap);
+    {
+        UINT bi;
+        for (bi = 0; bi < rc->nbatches; bi++) {
+            ID3D11ShaderResourceView *srv = rc->batches[bi].tex ? rc->batches[bi].tex->srv : g_white_srv;
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &srv);
+            ID3D11DeviceContext_Draw(g_ctx, rc->batches[bi].count, rc->batches[bi].first);
+        }
+    }
 
     /* back to the 2D pipeline */
     g_batch_srv = NULL;
@@ -1128,8 +1347,25 @@ static void __cdecl r_blit_to_screen(BlitRequest *req)
 }
 
 /* Not used in normal play yet: safe no-ops. */
-static int  __cdecl r_bind_texture(void *tex, int changed)   { (void)tex; (void)changed; return 1; }
-static void __cdecl r_unbind_texture(void *tex)              { (void)tex; }
+static int  __cdecl r_bind_texture(void *tex, int changed)
+{
+    RTexture *rt;
+    if (!g_dev || !tex) return 0;
+    rt = get_texture(tex);
+    if (rt && changed) {            /* texture contents changed: rebuild */
+        release_texture(rt);
+        rt = create_texture(tex);
+    }
+    return rt != NULL;
+}
+static void __cdecl r_unbind_texture(void *tex)
+{
+    RTexture *rt;
+    if (!readable(tex, 0x10)) return;
+    rt = (RTexture *)(uintptr_t)RD32(tex, 0x0C);
+    for (RTexture *t = g_textures; t; t = t->next)
+        if (t == rt) { release_texture(rt); return; }
+}
 static int  __cdecl r_load_world_data(void *p)               { (void)p; return 1; }
 static void *__cdecl r_create_context(void *init)
 {
@@ -1146,6 +1382,7 @@ static void __cdecl r_delete_context(void *ctx)
     if (!rc) return;
     if (rc == g_cur_ctx) g_cur_ctx = NULL;
     if (rc->vb) ID3D11Buffer_Release(rc->vb);
+    free(rc->batches);
     free(rc);
 }
 static void *__cdecl r_lock_screen(void)                     { return NULL; }
