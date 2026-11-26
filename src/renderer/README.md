@@ -1,3 +1,4 @@
-# Replacement renderer (d3d.ren)
+# Renderer
 
-Planned: a drop-in replacement for the Direct3D 7 renderer DLL. See docs/ROADMAP.md, Phase 1.
+- `render_struct.h`: clean-room description of the engine/renderer interface shared by AVP2 1.0.9.6 and Primal Hunt (see docs/renderer-interface.md).
+- Replacement D3D11 renderer: planned (ROADMAP Phase 1).

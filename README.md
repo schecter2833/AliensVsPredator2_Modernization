@@ -2,7 +2,7 @@
 
 A community project to modernize **Aliens versus Predator 2** (Monolith, 2001) and its expansion **Primal Hunt** (Third Law, 2002) for current PCs. We do this by reverse-engineering and replacing the LithTech Talon engine one piece at a time, without breaking compatibility with the existing 1.0.9.6 multiplayer community.
 
-> **Status: early research.** Nothing is playable yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
+> **Status: early research.** The renderer interface is mapped for both games, and a logging proxy renderer is ready for testing. There's no visual improvement yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
 
 ## Goals
 
@@ -27,9 +27,21 @@ This repository contains **no game files**: no executables, DLLs, `.rez` archive
 | Path | Contents |
 |---|---|
 | `tools/` | Research utilities (REZ extractor, PE inventory, REA renderer-slot comparison) |
-| `src/renderer/` | Replacement for `d3d.ren` (planned) |
+| `src/renderer/` | Renderer interface header; replacement for `d3d.ren` (planned) |
+| `src/trace/` | `avp2m_trace.ren`: logging proxy renderer for both games |
+| `tests/` | Self-tests (fake engine + fake renderer) |
+| `cmake/` | MinGW-w64 i686 toolchain file |
 | `src/hooks/` | Engine fix and hook layer (planned) |
 | `docs/` | Roadmap, findings, file-format notes |
+
+## Building
+
+```sh
+cmake -S . -B build -DCMAKE_TOOLCHAIN_FILE=cmake/mingw-i686.cmake -DCMAKE_BUILD_TYPE=Release
+cmake --build build
+```
+
+Everything builds as 32-bit Windows binaries, since the game is 32-bit. See [src/trace/README.md](src/trace/README.md) for testing the trace renderer.
 
 ## Tools
 

@@ -1,71 +1,91 @@
 # Renderer interface (`d3d.ren`)
 
-Status: **slot layout confirmed for both builds. The meaning of each slot isn't documented yet.**
+Status: **slot layout confirmed for both builds; slot names inferred from behavior (names ending in `?` are tentative).** The clean-room header is [`src/renderer/render_struct.h`](../src/renderer/render_struct.h). Runtime confirmation will come from the trace renderer ([`src/trace/`](../src/trace/)).
 
-## Loading
+All addresses refer to the reference builds in [hashes.md](hashes.md). Analysis: Ghidra 12.2 via REA, plus objdump call-site scans of `lithtech.exe`.
 
-The engine loads the renderer DLL (`d3d.ren`) and calls its three exports:
+## How the engine loads a renderer
 
-| Export | Purpose (current understanding) |
+1. **Mode enumeration.** The engine scans the game folder for `*.ren`. For each one it loads the DLL, calls `GetSupportedModes()` (no arguments, returns a linked list), and copies every mode record (0x214 bytes). It **overwrites each record's DLL-name field with that file's name**, then calls `FreeModeList(list)` and unloads the DLL. So any `.ren` file in the folder contributes its own modes.
+2. **Selection.** `autoexec.cfg` stores the choice as `"RENDERDLL" "d3d.ren"`, plus `CARDDESC`, `SCREENWIDTH`, `SCREENHEIGHT` and `BITDEPTH`.
+3. **Setup.** The engine loads the chosen `.ren` and calls `RenderDLLSetup(&render_struct)`. The renderer fills slots 0x70–0x104.
+4. **Init.** The engine builds a 0x218-byte init block: a version field, then a copy of the chosen mode record. It calls slot 0 with it. Init must return 0 **and** write `0xD5D` into the version field, or the engine unloads the renderer and reports an error. **Both AVP2 1.0.9.6 and Primal Hunt check for `0xD5D`.**
+5. The engine copies the requested width/height into the struct (+0x3C/+0x40), runs its own post-init steps, sets the initialized flag (+0x44), and logs `CardDesc`, `RenderDLL`, `ScreenWidth`, `ScreenHeight` and `BitDepth` to the console.
+
+The render struct is a single global in `lithtech.exe`: `0x004E4888` in AVP2 1.0.9.6.
+
+## Mode record (0x214 bytes)
+
+| Offset | Field |
 |---|---|
-| `RenderDLLSetup(RenderStruct*)` | Called once. Stores the engine's render struct pointer in a global, then fills a contiguous block of function-pointer slots in that struct. |
-| `GetSupportedModes()` | Enumerates display modes (returns a linked list; to be confirmed). |
-| `FreeModeList(list)` | Frees the list returned by `GetSupportedModes`. |
+| 0x000 | flags (tentative: hardware) |
+| 0x004 | renderer DLL name, 256 bytes |
+| 0x104 | device name, 128 bytes (logged as `CardDesc`) |
+| 0x184 | description, 128 bytes |
+| 0x204 | width |
+| 0x208 | height |
+| 0x20C | bit depth |
+| 0x210 | next record |
 
-## The render struct
+## Engine-side fields (0x00–0x6F)
 
-`RenderDLLSetup` receives a pointer to an engine-owned structure. Offsets **0x00–0x6F** are engine-side data or engine callbacks (not yet mapped). The renderer writes **38 function pointers** into the contiguous range **0x70–0x104**, one 4-byte slot each.
+| Offset | Meaning |
+|---|---|
+| 0x04–0x38 | 14 engine callbacks the renderer can call (the engine fills them before setup). The stock renderer uses callbacks at +0x18, +0x1C and +0x20 during Init; +0x1C also in `ReadConsoleVariables`, so it's probably a console-variable lookup. |
+| 0x3C / 0x40 | Screen width / height (set by the engine after Init) |
+| 0x44 | Renderer initialized flag (read at 26 places in the engine) |
+| 0x58–0x68 | Linked into the engine's console-variable table |
 
-**AVP2 1.0.9.6 and Primal Hunt use the same slot layout**: the same 38 offsets, the same range, and nothing extra in either build. So a single replacement renderer can serve both games, as long as the meaning of each slot also matches. Checking that is the next step.
+## Renderer slots (0x70–0x104)
 
-Analysis was done with Ghidra 12.2 through REA on the reference builds in [hashes.md](hashes.md). The addresses below are where each build's renderer implements each slot (image base `0x10000000` in both).
+All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra and nothing missing.
 
-| Offset | Slot # | AVP2 1.0.9.6 `d3d.ren` | Primal Hunt `d3d.ren` |
-|---|---:|---|---|
-| 0x070 | 0 | `0x10010B22` | `0x100118BE` |
-| 0x074 | 1 | `0x10010B13` | `0x100118AA` |
-| 0x078 | 2 | `0x10021B50` | `0x10022830` |
-| 0x07C | 3 | `0x10021C60` | `0x10022940` |
-| 0x080 | 4 | `0x1001B790` | `0x1001C3A0` |
-| 0x084 | 5 | `0x1001B700` | `0x1001C310` |
-| 0x088 | 6 | `0x1001B770` | `0x1001C380` |
-| 0x08C | 7 | `0x100142F0` | `0x10014D70` |
-| 0x090 | 8 | `0x1001BD80` | `0x1001C990` |
-| 0x094 | 9 | `0x1001BDB0` | `0x1001C9C0` |
-| 0x098 | 10 | `0x1001BE20` | `0x1001CA30` |
-| 0x09C | 11 | `0x1001C627` | `0x1001D237` |
-| 0x0A0 | 12 | `0x1001C725` | `0x1001D335` |
-| 0x0A4 | 13 | `0x1001C7EB` | `0x1001D3FB` |
-| 0x0A8 | 14 | `0x1001C7F1` | `0x1001D401` |
-| 0x0AC | 15 | `0x1001C8CA` | `0x1001D4DA` |
-| 0x0B0 | 16 | `0x1001C8B8` | `0x1001D4C8` |
-| 0x0B4 | 17 | `0x1001C8DA` | `0x1001D4EA` |
-| 0x0B8 | 18 | `0x10017AA0` | `0x10018520` |
-| 0x0BC | 19 | `0x1001B8A0` | `0x1001C4B0` |
-| 0x0C0 | 20 | `0x100109C6` | `0x1001175D` |
-| 0x0C4 | 21 | `0x1001E189` | `0x1001ED75` |
-| 0x0C8 | 22 | `0x1001BD70` | `0x1001C980` |
-| 0x0CC | 23 | `0x1001DEC3` | `0x1001EAB3` |
-| 0x0D0 | 24 | `0x1001DA7F` | `0x1001E66F` |
-| 0x0D4 | 25 | `0x1001DB2D` | `0x1001E71D` |
-| 0x0D8 | 26 | `0x1001DB4E` | `0x1001E73E` |
-| 0x0DC | 27 | `0x1001DB7E` | `0x1001E76E` |
-| 0x0E0 | 28 | `0x1001DBB4` | `0x1001E7A4` |
-| 0x0E4 | 29 | `0x1001C3E4` | `0x1001CFF4` |
-| 0x0E8 | 30 | `0x1001C3D2` | `0x1001CFE2` |
-| 0x0EC | 31 | `0x1001DBCA` | `0x1001E7BA` |
-| 0x0F0 | 32 | `0x1001DC4F` | `0x1001E83F` |
-| 0x0F4 | 33 | `0x1001DE1C` | `0x1001EA0C` |
-| 0x0F8 | 34 | `0x1001DE85` | `0x1001EA75` |
-| 0x0FC | 35 | `0x1001DF19` | `0x1001EB09` |
-| 0x100 | 36 | `0x10012E4C` | `0x10013BCD` |
-| 0x104 | 37 | `0x1001DC81` | `0x1001E871` |
+| # | Offset | Name | Evidence | AVP2 1.0.9.6 | Primal Hunt |
+|---:|---|---|---|---|---|
+| 0 | 0x070 | `Init` | Creates the DirectDraw/D3D device; writes version `0xD5D`; returns 0 on success | `0x10010B22` | `0x100118BE` |
+| 1 | 0x074 | `Term` | Short teardown routine | `0x10010B13` | `0x100118AA` |
+| 2 | 0x078 | `BindTexture?` | Reads a texture record's data field | `0x10021B50` | `0x10022830` |
+| 3 | 0x07C | `UnbindTexture?` | Releases a texture record's data | `0x10021C60` | `0x10022940` |
+| 4 | 0x080 | `LoadWorldData?` | Builds/pages in lightmaps | `0x1001B790` | `0x1001C3A0` |
+| 5 | 0x084 | `CreateContext?` | Allocates a 16-byte object | `0x1001B700` | `0x1001C310` |
+| 6 | 0x088 | `DeleteContext?` | Not yet characterized | `0x1001B770` | `0x1001C380` |
+| 7 | 0x08C | `Clear` | Engine passes 3 arguments | `0x100142F0` | `0x10014D70` |
+| 8 | 0x090 | `Start3D` | Sets the in-3D state | `0x1001BD80` | `0x1001C990` |
+| 9 | 0x094 | `End3D` | Clears the in-3D state | `0x1001BDB0` | `0x1001C9C0` |
+| 10 | 0x098 | `IsIn3D` | Returns the in-3D flag; engine checks it before 2D/3D calls (8 call sites) | `0x1001BE20` | `0x1001CA30` |
+| 11 | 0x09C | `StartOptimized2D` | Requires a device; enters 2D mode | `0x1001C627` | `0x1001D237` |
+| 12 | 0x0A0 | `EndOptimized2D` | Leaves 2D mode | `0x1001C725` | `0x1001D335` |
+| 13 | 0x0A4 | `IsInOptimized2D` | Returns the in-2D flag | `0x1001C7EB` | `0x1001D3FB` |
+| 14 | 0x0A8 | `SetOptimized2DBlend` | Stores a blend-mode selector | `0x1001C7F1` | `0x1001D401` |
+| 15 | 0x0AC | `GetOptimized2DBlend` | Writes the stored blend mode to a pointer | `0x1001C8CA` | `0x1001D4DA` |
+| 16 | 0x0B0 | `SetOptimized2DColor` | Stores a color with alpha forced to 0xFF | `0x1001C8B8` | `0x1001D4C8` |
+| 17 | 0x0B4 | `GetOptimized2DColor` | Writes the stored color to a pointer | `0x1001C8DA` | `0x1001D4EA` |
+| 18 | 0x0B8 | `RenderScene` | Large stack frame; the main scene draw | `0x10017AA0` | `0x10018520` |
+| 19 | 0x0BC | `RenderCommand` | Takes argc/argv; console command handler | `0x1001B8A0` | `0x1001C4B0` |
+| 20 | 0x0C0 | `GetHook` | Compares a string argument against hook names | `0x100109C6` | `0x1001175D` |
+| 21 | 0x0C4 | `SwapBuffers` | Called once per frame | `0x1001E189` | `0x1001ED75` |
+| 22 | 0x0C8 | `GetInfoFlags` | Stock renderer returns 0 | `0x1001BD70` | `0x1001C980` |
+| 23 | 0x0CC | `GetScreenFormat` | Fills a pixel-format record | `0x1001DEC3` | `0x1001EAB3` |
+| 24 | 0x0D0 | `CreateSurface` | Allocates a surface; out-of-memory message | `0x1001DA7F` | `0x1001E66F` |
+| 25 | 0x0D4 | `DeleteSurface` | Frees a surface | `0x1001DB2D` | `0x1001E71D` |
+| 26 | 0x0D8 | `GetSurfaceInfo` | Writes width/height to two pointers | `0x1001DB4E` | `0x1001E73E` |
+| 27 | 0x0DC | `LockSurface` | Returns a pointer from a surface | `0x1001DB7E` | `0x1001E76E` |
+| 28 | 0x0E0 | `UnlockSurface` | Releases a surface lock | `0x1001DBB4` | `0x1001E7A4` |
+| 29 | 0x0E4 | `OptimizeSurface` | Builds an optimized copy; takes a transparent color | `0x1001C3E4` | `0x1001CFF4` |
+| 30 | 0x0E8 | `UnoptimizeSurface` | Frees the optimized copy | `0x1001C3D2` | `0x1001CFE2` |
+| 31 | 0x0EC | `LockScreen?` | Not yet characterized | `0x1001DBCA` | `0x1001E7BA` |
+| 32 | 0x0F0 | `UnlockScreen?` | Not yet characterized | `0x1001DC4F` | `0x1001E83F` |
+| 33 | 0x0F4 | `BlitToScreen?` | Not yet characterized | `0x1001DE1C` | `0x1001EA0C` |
+| 34 | 0x0F8 | `WarpToScreen?` | Not yet characterized | `0x1001DE85` | `0x1001EA75` |
+| 35 | 0x0FC | `MakeScreenShot` | Writes a screenshot file; screenshot messages | `0x1001DF19` | `0x1001EB09` |
+| 36 | 0x100 | `ReadConsoleVariables` | No arguments; re-reads console variables through an engine callback | `0x10012E4C` | `0x10013BCD` |
+| 37 | 0x104 | `BlitFromScreen?` | Warns when drawing a non-optimized surface | `0x1001DC81` | `0x1001E871` |
 
 ## Next steps
 
-- [ ] Map the engine-side part of the struct (0x00–0x6F): which fields the renderer reads (window handle, screen width/height, bit depth, engine callbacks)
-- [ ] Name each of the 38 slots by behavior: init/term, begin/end scene, draw world, draw models, surfaces/textures, screen blits, gamma, mode switching, etc.
-- [ ] Confirm slot semantics match between the two builds (compare function size and call patterns per slot)
-- [ ] Find where `lithtech.exe` calls each slot, which gives argument counts and types
-- [ ] Write `src/renderer/render_struct.h`: an original, clean-room header describing the struct layout
-- [ ] Stub renderer: forwards every slot to the original `d3d.ren` and logs each call (a "proxy renderer"), so the exact calling sequence can be traced in a live game
+- [x] Map the slot layout in both builds
+- [x] Name slots from behavior; map the init contract and the mode record
+- [ ] Run the trace renderer in both games to confirm names, argument counts and call order (see `src/trace/README.md`)
+- [ ] Confirm the tentative slots (2–6, 31–34, 37) from trace logs
+- [ ] Map the 14 engine callbacks
+- [ ] Start the D3D11 renderer against `render_struct.h`

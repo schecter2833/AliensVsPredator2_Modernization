@@ -15,9 +15,11 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 ## Phase 1: Replacement renderer (`d3d.ren`)
 Client-side only, so no effect on multiplayer.
 - [x] Map the `RenderDLLSetup` slot table: 38 slots at 0x70–0x104, identical layout in AVP2 and Primal Hunt ([renderer-interface.md](renderer-interface.md))
-- [ ] Name each slot's behavior and map the engine-side struct fields
-- [ ] Reverse `GetSupportedModes` / `FreeModeList`
-- [ ] Stub renderer that loads and lets the engine boot (logging every call)
+- [x] Name each slot from behavior; map the init contract (version `0xD5D`), mode record and engine-side fields
+- [x] Clean-room header: `src/renderer/render_struct.h`
+- [x] Logging proxy renderer (`src/trace/`, `avp2m_trace.ren`) for both games
+- [ ] Collect trace logs from AVP2 and Primal Hunt; confirm tentative slots
+- [x] Reverse `GetSupportedModes` / `FreeModeList` and how the engine enumerates `*.ren`
 - [ ] Direct3D 11 backend (Vulkan later, or via DXVK)
 - [ ] Native widescreen and Hor+ FOV, arbitrary resolutions, high refresh rates
 - [ ] Correct HUD/menu scaling at 16:9 and 21:9
