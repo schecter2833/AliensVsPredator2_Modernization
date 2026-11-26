@@ -10,6 +10,7 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 - [x] Reverse-engineering setup guide: REA + Ghidra 12.2 ([RE-SETUP.md](RE-SETUP.md))
 - [ ] Shared symbol/type exports (names and types only, no decompiled code)
 - [x] Identify that Primal Hunt uses its own engine build (see FINDINGS.md)
+- [ ] Capture the Primal Hunt launcher's `avp2cmds.txt` (exact `-rez` list); retest the Zeta Site load crash
 - [ ] Diff the AVP2 vs Primal Hunt engine interfaces (function tables, struct sizes)
 
 ## Phase 1: Replacement renderer (`d3d.ren`)
@@ -18,7 +19,10 @@ Client-side only, so no effect on multiplayer.
 - [x] Name each slot from behavior; map the init contract (version `0xD5D`), mode record and engine-side fields
 - [x] Clean-room header: `src/renderer/render_struct.h`
 - [x] Logging proxy renderer (`src/trace/`, `avp2m_trace.ren`) for both games
-- [ ] Collect trace logs from AVP2 and Primal Hunt; confirm tentative slots
+- [x] Collect trace logs from AVP2 and Primal Hunt; confirm slots 2, 3, 5, 6, 33 ([runtime-findings.md](runtime-findings.md))
+- [ ] Decide how to serve `GetHook("LPDIRECTDRAW")` / `GetHook("BACKBUFFER")` (find the feature that uses them)
+- [ ] Survive repeated Term/unload/reload on focus loss; make alt-tab painless
+- [ ] Own window placement in windowed mode (stock engine puts the window mostly off-screen on wide displays)
 - [x] Reverse `GetSupportedModes` / `FreeModeList` and how the engine enumerates `*.ren`
 - [ ] Direct3D 11 backend (Vulkan later, or via DXVK)
 - [ ] Native widescreen and Hor+ FOV, arbitrary resolutions, high refresh rates
@@ -27,6 +31,7 @@ Client-side only, so no effect on multiplayer.
 
 ## Phase 2: Engine hook layer
 An injected DLL that patches `lithtech.exe` at runtime. The files on disk are never touched.
+- [ ] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game)
 - [ ] Frame-time / physics fix for high FPS (movement, jumping and wall-walking break above ~60 FPS)
 - [ ] Raw mouse input in place of DirectInput 7; fix mouse acceleration
 - [ ] Controller support (XInput / SDL)

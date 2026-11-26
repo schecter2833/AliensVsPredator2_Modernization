@@ -1,0 +1,244 @@
+# avp2m_trace 0.1.1, Primal Hunt, windowed 640x480: main menu idle, then level load (crashed in OBJECT.LTO, see runtime-findings.md).
+# Periodic summaries removed.
+[      0 ms] avp2m_trace 0.1.1 loaded
+[     31 ms] loaded stock renderer C:\Users\ericr\Desktop\All In One (AVP2)\AVP2-Modern\test-ph\d3d.ren at 042E0000
+[     31 ms] RenderDLLSetup: render struct at 004F5A48, 38 slots hooked
+[     31 ms]   slot  0 +0x070 Init                   stock=042F18BE
+[     31 ms]   slot  1 +0x074 Term                   stock=042F18AA
+[     31 ms]   slot  2 +0x078 BindTexture?           stock=04302830
+[     31 ms]   slot  3 +0x07C UnbindTexture?         stock=04302940
+[     31 ms]   slot  4 +0x080 LoadWorldData?         stock=042FC3A0
+[     31 ms]   slot  5 +0x084 CreateContext?         stock=042FC310
+[     31 ms]   slot  6 +0x088 DeleteContext?         stock=042FC380
+[     31 ms]   slot  7 +0x08C Clear                  stock=042F4D70
+[     31 ms]   slot  8 +0x090 Start3D                stock=042FC990
+[     31 ms]   slot  9 +0x094 End3D                  stock=042FC9C0
+[     31 ms]   slot 10 +0x098 IsIn3D                 stock=042FCA30
+[     31 ms]   slot 11 +0x09C StartOptimized2D       stock=042FD237
+[     31 ms]   slot 12 +0x0A0 EndOptimized2D         stock=042FD335
+[     31 ms]   slot 13 +0x0A4 IsInOptimized2D        stock=042FD3FB
+[     31 ms]   slot 14 +0x0A8 SetOptimized2DBlend    stock=042FD401
+[     31 ms]   slot 15 +0x0AC GetOptimized2DBlend    stock=042FD4DA
+[     31 ms]   slot 16 +0x0B0 SetOptimized2DColor    stock=042FD4C8
+[     31 ms]   slot 17 +0x0B4 GetOptimized2DColor    stock=042FD4EA
+[     31 ms]   slot 18 +0x0B8 RenderScene            stock=042F8520
+[     31 ms]   slot 19 +0x0BC RenderCommand          stock=042FC4B0
+[     31 ms]   slot 20 +0x0C0 GetHook                stock=042F175D
+[     31 ms]   slot 21 +0x0C4 SwapBuffers            stock=042FED75
+[     31 ms]   slot 22 +0x0C8 GetInfoFlags           stock=042FC980
+[     31 ms]   slot 23 +0x0CC GetScreenFormat        stock=042FEAB3
+[     31 ms]   slot 24 +0x0D0 CreateSurface          stock=042FE66F
+[     31 ms]   slot 25 +0x0D4 DeleteSurface          stock=042FE71D
+[     31 ms]   slot 26 +0x0D8 GetSurfaceInfo         stock=042FE73E
+[     31 ms]   slot 27 +0x0DC LockSurface            stock=042FE76E
+[     31 ms]   slot 28 +0x0E0 UnlockSurface          stock=042FE7A4
+[     31 ms]   slot 29 +0x0E4 OptimizeSurface        stock=042FCFF4
+[     31 ms]   slot 30 +0x0E8 UnoptimizeSurface      stock=042FCFE2
+[     31 ms]   slot 31 +0x0EC LockScreen?            stock=042FE7BA
+[     31 ms]   slot 32 +0x0F0 UnlockScreen?          stock=042FE83F
+[     31 ms]   slot 33 +0x0F4 BlitToScreen?          stock=042FEA0C
+[     31 ms]   slot 34 +0x0F8 WarpToScreen?          stock=042FEA75
+[     31 ms]   slot 35 +0x0FC MakeScreenShot         stock=042FEB09
+[     31 ms]   slot 36 +0x100 ReadConsoleVariables   stock=042F3BCD
+[     31 ms]   slot 37 +0x104 BlitFromScreen?        stock=042FE871
+[     31 ms]   engine callback  0 +0x04 = 00475150
+[     31 ms]   engine callback  1 +0x08 = 00475180
+[     31 ms]   engine callback  2 +0x0C = 004751A0
+[     31 ms]   engine callback  3 +0x10 = 004751C0
+[     31 ms]   engine callback  4 +0x14 = 004751E0
+[     31 ms]   engine callback  5 +0x18 = 0040B200
+[     31 ms]   engine callback  6 +0x1C = 00475220
+[     31 ms]   engine callback  7 +0x20 = 00475240
+[     31 ms]   engine callback  8 +0x24 = 004048D0
+[     31 ms]   engine callback  9 +0x28 = 00475270
+[     31 ms]   engine callback 10 +0x2C = 00475250
+[     31 ms]   engine callback 11 +0x30 = 00475290
+[     31 ms]   engine callback 12 +0x34 = 004752A0
+[     31 ms]   engine callback 13 +0x38 = 004752B0
+[     31 ms] slot  0 Init                   #1 caller=00475436 args=001AED34 004F5A48 001AF284 004F5A44
+[     31 ms] Init request: 640x480x32 dll=avp2m_trace.ren device=display
+[    343 ms] Init result=0 version=D5D (expect D5D) engine screen=640x480
+[    343 ms] slot 23 GetScreenFormat        #1 caller=0040FFE6 args=004F00C8 00475463 004F5A48 001AF284
+[    343 ms] slot 36 ReadConsoleVariables   #1 caller=00411C39 args=00000000 00000001 0273A9A0 00475557
+[    343 ms] slot  2 BindTexture?           #1 caller=00475809 args=033249A0 00000000 00411C54 033249A0
+[    343 ms] slot 24 CreateSurface          #1 caller=0040D197 args=00000140 00000078 004F4100 00000140
+[    343 ms] slot 26 GetSurfaceInfo         #1 caller=0040D1BF args=03A2C528 001AE7C4 001AE7C8 001AE7BC
+[    343 ms] slot 27 LockSurface            #1 caller=0040D3F0 args=03A2C528 001AE7EC 03B621C4 00000001
+[    343 ms] slot 28 UnlockSurface          #1 caller=0040D4B7 args=03A2C528 001AE7EC 03B621C4 00000001
+[    343 ms] slot 29 OptimizeSurface        #1 caller=0040DDE7 args=03A2C528 FFFFFFFF 004F4100 00424089
+[    343 ms] slot 24 CreateSurface          #2 caller=0040D197 args=0000000A 0000000A 033249F0 0000000A
+[    343 ms] slot 26 GetSurfaceInfo         #2 caller=0040D1BF args=03B61028 001AEC48 001AEC4C 001AEC40
+[    343 ms] slot 27 LockSurface            #2 caller=0040D3F0 args=03B61028 001AEC68 03B62198 00000000
+[    343 ms] slot 28 UnlockSurface          #2 caller=0040D4B7 args=03B61028 001AEC68 03B62198 00000000
+[    343 ms] slot 27 LockSurface            #3 caller=0040FCCC args=03B61028 03EA0CE8 033249F0 00000000
+[    343 ms] slot 28 UnlockSurface          #3 caller=0040FD58 args=03B61028 03EA0CE8 033249F0 00000000
+[    343 ms] slot 29 OptimizeSurface        #2 caller=0040DDE7 args=03B61028 00000000 033249F0 03BFF734
+[    531 ms] slot 24 CreateSurface          #3 caller=0040D197 args=000002A0 0000000E 045D32C0 000002A0
+[    531 ms] slot 26 GetSurfaceInfo         #3 caller=0040D1BF args=03B61F40 001AE848 001AE84C 001AE840
+[    531 ms] slot 27 LockSurface            #4 caller=0040D3F0 args=03B61F40 001AE868 03B6216C 045D32C0
+[    531 ms] slot 28 UnlockSurface          #4 caller=0040D4B7 args=03B61F40 001AE868 03B6216C 045D32C0
+[    531 ms] slot 24 CreateSurface          #4 caller=0040D197 args=000004BA 00000017 047318D0 000004BA
+[    531 ms] slot 26 GetSurfaceInfo         #4 caller=0040D1BF args=03B63018 001AE848 001AE84C 001AE840
+[    531 ms] slot 27 LockSurface            #5 caller=0040D3F0 args=03B63018 001AE868 03B62140 047318D0
+[    531 ms] slot 28 UnlockSurface          #5 caller=0040D4B7 args=03B63018 001AE868 03B62140 047318D0
+[    531 ms] slot 24 CreateSurface          #5 caller=0040D197 args=000004BA 00000017 04733598 000004BA
+[    531 ms] slot 26 GetSurfaceInfo         #5 caller=0040D1BF args=03B630B0 001AE838 001AE83C 001AE830
+[    531 ms] slot 27 LockSurface            #6 caller=0040D3F0 args=03B630B0 001AE858 03B62114 04733598
+[    531 ms] slot 28 UnlockSurface          #6 caller=0040D4B7 args=03B630B0 001AE858 03B62114 04733598
+[    531 ms] slot 24 CreateSurface          #6 caller=0040D197 args=000004BA 00000017 04735260 000004BA
+[    531 ms] slot 26 GetSurfaceInfo         #6 caller=0040D1BF args=03B63148 001AE838 001AE83C 001AE830
+[    531 ms] slot 27 LockSurface            #7 caller=0040D3F0 args=03B63148 001AE858 03B620E8 04735260
+[    531 ms] slot 28 UnlockSurface          #7 caller=0040D4B7 args=03B63148 001AE858 03B620E8 04735260
+[    531 ms] slot 24 CreateSurface          #7 caller=0040D197 args=000004BA 00000017 04736F28 000004BA
+[    531 ms] slot 26 GetSurfaceInfo         #7 caller=0040D1BF args=03B631E0 001AE838 001AE83C 001AE830
+[    531 ms] slot 27 LockSurface            #8 caller=0040D3F0 args=03B631E0 001AE858 03B620BC 04736F28
+[    531 ms] slot 28 UnlockSurface          #8 caller=0040D4B7 args=03B631E0 001AE858 03B620BC 04736F28
+[    531 ms] slot 24 CreateSurface          #8 caller=0040D197 args=000002A0 0000000E 04738BF0 000002A0
+[    531 ms] slot 26 GetSurfaceInfo         #8 caller=0040D1BF args=03B85240 001AE848 001AE84C 001AE840
+[    562 ms] slot 29 OptimizeSurface        #3 caller=0040DDE7 args=03B83BE0 FFFFFFFF 03EA0CF0 03C08DE1
+[    562 ms] slot 29 OptimizeSurface        #4 caller=0040DDE7 args=03B835F0 00000000 04776E10 03BC1BA4
+[    562 ms] slot 29 OptimizeSurface        #5 caller=0040DDE7 args=03B83130 00000000 03EA0D54 03C0A6E8
+[    562 ms] slot 29 OptimizeSurface        #6 caller=0040DDE7 args=03B83688 00000000 03EA27C4 03C49540
+[    562 ms] slot 29 OptimizeSurface        #7 caller=0040DDE7 args=03B83B48 00000000 03EA27C4 03C4A637
+[    562 ms] slot 29 OptimizeSurface        #8 caller=0040DDE7 args=03B83C78 00000000 04507E18 03C16DF1
+[    609 ms] slot  7 Clear                  #1 caller=00409B0A args=001AF234 00000001 00000000 00000000
+[    609 ms] slot 25 DeleteSurface          #1 caller=0040D5D8 args=03B89958 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #2 caller=0040D5D8 args=03B89368 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #3 caller=0040D5D8 args=03B89368 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #4 caller=0040D5D8 args=03B88950 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #5 caller=0040D5D8 args=03B89A88 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #6 caller=0040D5D8 args=03B89790 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #7 caller=0040D5D8 args=03B88950 03B84720 0040D59E 03B84720
+[    609 ms] slot 25 DeleteSurface          #8 caller=0040D5D8 args=03B89790 03B84720 0040D59E 03B84720
+[    625 ms] slot  7 Clear                  #2 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    625 ms] slot 33 BlitToScreen?          #1 caller=0040EF7A args=001AFCD4 03B8474C 00000000 004EFF90
+[    625 ms] slot 10 IsIn3D                 #1 caller=00409B66 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot  8 Start3D                #1 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 10 IsIn3D                 #2 caller=00409E16 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 11 StartOptimized2D       #1 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 33 BlitToScreen?          #2 caller=0040EF7A args=001AFC84 03B92F70 00000000 80FFFFFF
+[    625 ms] slot 10 IsIn3D                 #3 caller=00409EA6 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 12 EndOptimized2D         #1 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 10 IsIn3D                 #4 caller=0040A076 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot  9 End3D                  #1 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 21 SwapBuffers            #1 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    625 ms] slot  7 Clear                  #3 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    625 ms] slot 33 BlitToScreen?          #3 caller=0040EF7A args=001AFCD4 03B8474C 00000000 004EFF90
+[    625 ms] slot 10 IsIn3D                 #5 caller=00409B66 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot  8 Start3D                #2 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 10 IsIn3D                 #6 caller=00409E16 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 11 StartOptimized2D       #2 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 33 BlitToScreen?          #4 caller=0040EF7A args=001AFC84 03B92F70 00000000 80FFFFFF
+[    625 ms] slot 10 IsIn3D                 #7 caller=00409EA6 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 12 EndOptimized2D         #2 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 10 IsIn3D                 #8 caller=0040A076 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot  9 End3D                  #2 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    625 ms] slot 21 SwapBuffers            #2 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  7 Clear                  #4 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    640 ms] slot 33 BlitToScreen?          #5 caller=0040EF7A args=001AFCD4 03B8474C 00000000 004EFF90
+[    640 ms] slot  8 Start3D                #3 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #3 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 33 BlitToScreen?          #6 caller=0040EF7A args=001AFC84 03B92F70 00000000 80FFFFFF
+[    640 ms] slot 12 EndOptimized2D         #3 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #3 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #3 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  7 Clear                  #5 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    640 ms] slot 33 BlitToScreen?          #7 caller=0040EF7A args=001AFCD4 03B8474C 00000000 004EFF90
+[    640 ms] slot  8 Start3D                #4 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #4 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 33 BlitToScreen?          #8 caller=0040EF7A args=001AFC84 03B92F70 00000000 80FFFFFF
+[    640 ms] slot 12 EndOptimized2D         #4 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #4 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #4 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  7 Clear                  #6 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    640 ms] slot  8 Start3D                #5 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #5 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 12 EndOptimized2D         #5 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #5 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #5 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  7 Clear                  #7 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    640 ms] slot  8 Start3D                #6 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #6 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 12 EndOptimized2D         #6 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #6 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #6 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  7 Clear                  #8 caller=00409B0A args=001AFD90 00000003 001AFDB4 00000000
+[    640 ms] slot  8 Start3D                #7 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #7 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 12 EndOptimized2D         #7 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #7 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #7 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[    640 ms] slot  8 Start3D                #8 caller=00409BA8 args=03C008E8 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 11 StartOptimized2D       #8 caller=00409E58 args=03C008F0 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 12 EndOptimized2D         #8 caller=00409EE8 args=03C00900 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot  9 End3D                  #8 caller=0040A0B8 args=03C00909 03EA0CE8 FFFFFFFF 03EA0CE8
+[    640 ms] slot 21 SwapBuffers            #8 caller=0041220F args=00000001 004099E0 00000001 03C0037D
+[  23125 ms] slot  2 BindTexture?           #2 caller=00475809 args=03324960 00000000 0042878D 03324960
+[  23140 ms] slot  2 BindTexture?           #3 caller=00475809 args=03324920 00000000 0042878D 03324920
+[  23140 ms] slot  2 BindTexture?           #4 caller=00475809 args=033248E0 00000000 0042878D 033248E0
+[  23140 ms] slot  2 BindTexture?           #5 caller=00475809 args=033248A0 00000000 0042878D 033248A0
+[  23140 ms] slot  2 BindTexture?           #6 caller=00475809 args=03324860 00000000 0042878D 03324860
+[  23140 ms] slot  2 BindTexture?           #7 caller=00475809 args=03324820 00000000 0042878D 03324820
+[  23140 ms] slot  2 BindTexture?           #8 caller=00475809 args=033247E0 00000000 0042878D 033247E0
+[  23140 ms] slot 18 RenderScene            #1 caller=00413C90 args=001AFAF8 001AFD0C 00000011 8711765E
+[  23156 ms] slot 18 RenderScene            #2 caller=00413C90 args=001AFAF8 001AFD0C 00000011 8712F903
+[  23156 ms] slot 18 RenderScene            #3 caller=00413C90 args=001AFAF8 001AFD0C 00000011 87131EEB
+[  23156 ms] slot 18 RenderScene            #4 caller=00413C90 args=001AFAF8 001AFD0C 00000011 87133151
+[  23156 ms] slot 18 RenderScene            #5 caller=00413C90 args=001AFAF8 001AFD0C 00000011 871343F0
+[  23156 ms] slot 18 RenderScene            #6 caller=00413C90 args=001AFAF8 001AFD0C 00000011 87135572
+[  23156 ms] slot 18 RenderScene            #7 caller=00413C90 args=001AFAF8 001AFD0C 00000011 871366E8
+[  23156 ms] slot 18 RenderScene            #8 caller=00413C90 args=001AFAF8 001AFD0C 00000011 87137A22
+[ 778890 ms] slot  3 UnbindTexture?         #1 caller=00475825 args=033246E0 033246F0 00411C8B 033246E0
+[ 778890 ms] slot  3 UnbindTexture?         #2 caller=00475825 args=03324720 03324730 00411C8B 03324720
+[ 778890 ms] slot  3 UnbindTexture?         #3 caller=00475825 args=03324760 03324770 00411C8B 03324760
+[ 778890 ms] slot  3 UnbindTexture?         #4 caller=00475825 args=033247A0 033247B0 00411C8B 033247A0
+[ 778890 ms] slot  3 UnbindTexture?         #5 caller=00475825 args=033247E0 033247F0 00411C8B 033247E0
+[ 778890 ms] slot  3 UnbindTexture?         #6 caller=00475825 args=03324820 03324830 00411C8B 03324820
+[ 778890 ms] slot  3 UnbindTexture?         #7 caller=00475825 args=03324860 03324870 00411C8B 03324860
+[ 778890 ms] slot  3 UnbindTexture?         #8 caller=00475825 args=033248A0 033248B0 00411C8B 033248A0
+[ 778890 ms] slot  1 Term                   #1 caller=00475788 args=0000001C 00403A1C 0273A9A0 00000001
+[ 778890 ms] ---- call counts (Term) ----
+[ 778890 ms]   slot  0 Init                            1
+[ 778890 ms]   slot  1 Term                            1
+[ 778890 ms]   slot  2 BindTexture?                   12
+[ 778890 ms]   slot  3 UnbindTexture?                 12
+[ 778890 ms]   slot  7 Clear                     2073961
+[ 778890 ms]   slot  8 Start3D                   2073960
+[ 778890 ms]   slot  9 End3D                     2073960
+[ 778890 ms]   slot 10 IsIn3D                   10310431
+[ 778890 ms]   slot 11 StartOptimized2D          2073960
+[ 778890 ms]   slot 12 EndOptimized2D            2073960
+[ 778890 ms]   slot 18 RenderScene               2014591
+[ 778890 ms]   slot 21 SwapBuffers               2073960
+[ 778890 ms]   slot 23 GetScreenFormat                 1
+[ 778890 ms]   slot 24 CreateSurface                 176
+[ 778890 ms]   slot 25 DeleteSurface                 176
+[ 778890 ms]   slot 26 GetSurfaceInfo                176
+[ 778890 ms]   slot 27 LockSurface                   603
+[ 778890 ms]   slot 28 UnlockSurface                 603
+[ 778890 ms]   slot 29 OptimizeSurface                43
+[ 778890 ms]   slot 33 BlitToScreen?           229735788
+[ 778890 ms]   slot 36 ReadConsoleVariables            1
+[ 778890 ms] ---- call counts (unload) ----
+[ 778890 ms]   slot  0 Init                            1
+[ 778890 ms]   slot  1 Term                            1
+[ 778890 ms]   slot  2 BindTexture?                   12
+[ 778890 ms]   slot  3 UnbindTexture?                 12
+[ 778890 ms]   slot  7 Clear                     2073961
+[ 778890 ms]   slot  8 Start3D                   2073960
+[ 778890 ms]   slot  9 End3D                     2073960
+[ 778890 ms]   slot 10 IsIn3D                   10310431
+[ 778890 ms]   slot 11 StartOptimized2D          2073960
+[ 778890 ms]   slot 12 EndOptimized2D            2073960
+[ 778890 ms]   slot 18 RenderScene               2014591
+[ 778890 ms]   slot 21 SwapBuffers               2073960
+[ 778890 ms]   slot 23 GetScreenFormat                 1
+[ 778890 ms]   slot 24 CreateSurface                 176
+[ 778890 ms]   slot 25 DeleteSurface                 176
+[ 778890 ms]   slot 26 GetSurfaceInfo                176
+[ 778890 ms]   slot 27 LockSurface                   603
+[ 778890 ms]   slot 28 UnlockSurface                 603
+[ 778890 ms]   slot 29 OptimizeSurface                43
+[ 778890 ms]   slot 33 BlitToScreen?           229735788
+[ 778890 ms]   slot 36 ReadConsoleVariables            1
+[      0 ms] avp2m_trace 0.1.1 loaded

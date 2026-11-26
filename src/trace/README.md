@@ -46,7 +46,7 @@ To undo: restore `autoexec.cfg` (or set `RENDERDLL` back to `d3d.ren`) and delet
 - The display modes the stock renderer reports
 - The Init request (resolution, device) and its result
 - The first 8 calls of every slot, with caller address and the first 4 stack arguments
-- Call counts per slot every 1800 frames, at `Term`, and when the game exits
+- Call counts per slot every 30 seconds, at `Term`, and when the game exits
 
 ## How it works
 

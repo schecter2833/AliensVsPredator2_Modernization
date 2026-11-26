@@ -14,6 +14,9 @@ int main(void) {
     typedef int (__cdecl *FInit)(RenderInit *);
     RenderStruct rs; RenderInit init; RenderMode *modes, *m; int i, n = 0;
     HMODULE h;
+    const char *cmd_argv[2] = { "testcommand", NULL };
+
+    setvbuf(stdout, NULL, _IONBF, 0);
 
     /* 1. enumeration pass: load, list modes, free, unload */
     h = LoadLibraryA("avp2m_trace.ren"); CHECK(h != NULL, "load proxy");
@@ -40,6 +43,12 @@ int main(void) {
         CHECK(r == (i + 7 + 1000) * 100 + i, "slot %d returned %d", i, r);
     }
     CHECK(((F64)(void*)rs.slots[37])() == 0x1122334455667788LL, "64-bit return through thunk");
+
+    /* 3b. guessed-pointer arguments: a real console command, then garbage
+     * pointers that the logger must not dereference */
+    CHECK(((F3)(void*)rs.slots[RS_RenderCommand])(1, (int)(intptr_t)cmd_argv, 0) == (1 + (int)(intptr_t)cmd_argv) * 100 + RS_RenderCommand, "RenderCommand passthrough");
+    ((F3)(void*)rs.slots[RS_GetHook])(0x10, 0, 0);
+    printf("pointer-safety checks survived\n");
 
     /* 4. many frames, to exercise the periodic summary */
     for (i = 0; i < 4000; i++) ((F3)(void*)rs.slots[RS_SwapBuffers])(0, 0, 0);

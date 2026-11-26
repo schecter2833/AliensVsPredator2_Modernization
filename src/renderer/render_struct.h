@@ -57,11 +57,11 @@ typedef void (*AVP2M_Fn)(void);
 enum RenderSlot {
     RS_Init = 0,              /* int  (RenderInit*)                 0 = ok  */
     RS_Term,                  /* void (?)                                   */
-    RS_BindTexture,           /* TENTATIVE: (SharedTexture*, ?)             */
-    RS_UnbindTexture,         /* TENTATIVE: (SharedTexture*)                */
+    RS_BindTexture,           /* (texture*, flag) - paired 1:1 with Unbind   */
+    RS_UnbindTexture,         /* (texture*)                                 */
     RS_LoadWorldData,         /* TENTATIVE: creates/pages in lightmaps      */
-    RS_CreateContext,         /* TENTATIVE: allocates a 16-byte context     */
-    RS_DeleteContext,         /* TENTATIVE */
+    RS_CreateContext,         /* (ContextInit*) -> context; at level start  */
+    RS_DeleteContext,         /* (context) at level end                     */
     RS_Clear,                 /* (rect*, flags, color)                      */
     RS_Start3D,
     RS_End3D,
@@ -75,7 +75,8 @@ enum RenderSlot {
     RS_GetOptimized2DColor,   /* (color* out)                               */
     RS_RenderScene,           /* (SceneDesc*)                               */
     RS_RenderCommand,         /* (argc, argv) console command               */
-    RS_GetHook,               /* (const char* name) -> void*                */
+    RS_GetHook,               /* (name) -> void*; game asks for
+                                 "LPDIRECTDRAW" and "BACKBUFFER"            */
     RS_SwapBuffers,           /* (flags) once per frame                     */
     RS_GetInfoFlags,          /* () -> flags (stock renderer returns 0)     */
     RS_GetScreenFormat,       /* (PixelFormat* out)                         */
@@ -88,7 +89,7 @@ enum RenderSlot {
     RS_UnoptimizeSurface,     /* (surface)                                  */
     RS_LockScreen,            /* TENTATIVE */
     RS_UnlockScreen,          /* TENTATIVE */
-    RS_BlitToScreen,          /* TENTATIVE */
+    RS_BlitToScreen,          /* (BlitRequest*) all 2D/menu drawing         */
     RS_WarpToScreen,          /* TENTATIVE */
     RS_MakeScreenShot,        /* (const char* filename)                     */
     RS_ReadConsoleVariables,  /* () re-reads renderer console variables     */

@@ -1,6 +1,6 @@
 # Renderer interface (`d3d.ren`)
 
-Status: **slot layout confirmed for both builds; slot names inferred from behavior (names ending in `?` are tentative).** The clean-room header is [`src/renderer/render_struct.h`](../src/renderer/render_struct.h). Runtime confirmation will come from the trace renderer ([`src/trace/`](../src/trace/)).
+Status: **slot layout confirmed for both builds and exercised at runtime in both games (see [runtime-findings.md](runtime-findings.md)). Names ending in `?` are still tentative.** The clean-room header is [`src/renderer/render_struct.h`](../src/renderer/render_struct.h). Runtime confirmation will come from the trace renderer ([`src/trace/`](../src/trace/)).
 
 All addresses refer to the reference builds in [hashes.md](hashes.md). Analysis: Ghidra 12.2 via REA, plus objdump call-site scans of `lithtech.exe`.
 
@@ -44,11 +44,11 @@ All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra 
 |---:|---|---|---|---|---|
 | 0 | 0x070 | `Init` | Creates the DirectDraw/D3D device; writes version `0xD5D`; returns 0 on success | `0x10010B22` | `0x100118BE` |
 | 1 | 0x074 | `Term` | Short teardown routine | `0x10010B13` | `0x100118AA` |
-| 2 | 0x078 | `BindTexture?` | Reads a texture record's data field | `0x10021B50` | `0x10022830` |
-| 3 | 0x07C | `UnbindTexture?` | Releases a texture record's data | `0x10021C60` | `0x10022940` |
+| 2 | 0x078 | `BindTexture` | Reads a texture record's data field | `0x10021B50` | `0x10022830` |
+| 3 | 0x07C | `UnbindTexture` | Releases a texture record's data | `0x10021C60` | `0x10022940` |
 | 4 | 0x080 | `LoadWorldData?` | Builds/pages in lightmaps | `0x1001B790` | `0x1001C3A0` |
-| 5 | 0x084 | `CreateContext?` | Allocates a 16-byte object | `0x1001B700` | `0x1001C310` |
-| 6 | 0x088 | `DeleteContext?` | Not yet characterized | `0x1001B770` | `0x1001C380` |
+| 5 | 0x084 | `CreateContext` | Allocates a 16-byte object | `0x1001B700` | `0x1001C310` |
+| 6 | 0x088 | `DeleteContext` | Not yet characterized | `0x1001B770` | `0x1001C380` |
 | 7 | 0x08C | `Clear` | Engine passes 3 arguments | `0x100142F0` | `0x10014D70` |
 | 8 | 0x090 | `Start3D` | Sets the in-3D state | `0x1001BD80` | `0x1001C990` |
 | 9 | 0x094 | `End3D` | Clears the in-3D state | `0x1001BDB0` | `0x1001C9C0` |
@@ -75,7 +75,7 @@ All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra 
 | 30 | 0x0E8 | `UnoptimizeSurface` | Frees the optimized copy | `0x1001C3D2` | `0x1001CFE2` |
 | 31 | 0x0EC | `LockScreen?` | Not yet characterized | `0x1001DBCA` | `0x1001E7BA` |
 | 32 | 0x0F0 | `UnlockScreen?` | Not yet characterized | `0x1001DC4F` | `0x1001E83F` |
-| 33 | 0x0F4 | `BlitToScreen?` | Not yet characterized | `0x1001DE1C` | `0x1001EA0C` |
+| 33 | 0x0F4 | `BlitToScreen` | Not yet characterized | `0x1001DE1C` | `0x1001EA0C` |
 | 34 | 0x0F8 | `WarpToScreen?` | Not yet characterized | `0x1001DE85` | `0x1001EA75` |
 | 35 | 0x0FC | `MakeScreenShot` | Writes a screenshot file; screenshot messages | `0x1001DF19` | `0x1001EB09` |
 | 36 | 0x100 | `ReadConsoleVariables` | No arguments; re-reads console variables through an engine callback | `0x10012E4C` | `0x10013BCD` |
@@ -85,7 +85,8 @@ All slots are `__cdecl`. Both builds fill the same 38 slots, with nothing extra 
 
 - [x] Map the slot layout in both builds
 - [x] Name slots from behavior; map the init contract and the mode record
-- [ ] Run the trace renderer in both games to confirm names, argument counts and call order (see `src/trace/README.md`)
-- [ ] Confirm the tentative slots (2–6, 31–34, 37) from trace logs
+- [x] Run the trace renderer in both games to confirm names, argument counts and call order
+- [x] Confirm slots 2, 3, 5, 6, 33 from traces
+- [ ] Slots never seen at runtime yet: 4, 13, 15, 17, 19, 22, 30, 31, 32, 34, 35 (screenshot, console commands, alt paths)
 - [ ] Map the 14 engine callbacks
 - [ ] Start the D3D11 renderer against `render_struct.h`

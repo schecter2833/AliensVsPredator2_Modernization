@@ -2,7 +2,7 @@
 
 A community project to modernize **Aliens versus Predator 2** (Monolith, 2001) and its expansion **Primal Hunt** (Third Law, 2002) for current PCs. We do this by reverse-engineering and replacing the LithTech Talon engine one piece at a time, without breaking compatibility with the existing 1.0.9.6 multiplayer community.
 
-> **Status: early research.** The renderer interface is mapped for both games, and a logging proxy renderer is ready for testing. There's no visual improvement yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
+> **Status: early research.** The renderer interface is mapped for both games and confirmed at runtime: AVP2 runs menus, cutscenes and gameplay through our logging proxy renderer ([runtime findings](docs/runtime-findings.md)). There's no visual improvement yet. See [docs/ROADMAP.md](docs/ROADMAP.md) for the plan and [docs/FINDINGS.md](docs/FINDINGS.md) for what we've learned so far.
 
 ## Goals
 

@@ -17,9 +17,9 @@
 
 #include "../renderer/render_struct.h"
 
-#define TRACE_VERSION      "0.1.0"
+#define TRACE_VERSION      "0.1.2"
 #define LOG_FIRST_CALLS    8      /* full lines for the first N calls per slot */
-#define SUMMARY_EVERY      1800   /* frames between count summaries (~30s at 60 fps) */
+#define SUMMARY_EVERY_MS   30000  /* ms between count summaries (menus run uncapped at 2000+ fps) */
 
 /* Referenced from thunks.S */
 AVP2M_Fn avp2m_orig_slots[RS_SLOT_COUNT];
@@ -27,15 +27,15 @@ extern const AVP2M_Fn avp2m_thunk_table[RS_SLOT_COUNT];
 void __cdecl avp2m_trace_enter(int idx, const uint32_t *args);
 
 static const char *const g_slot_names[RS_SLOT_COUNT] = {
-    "Init", "Term", "BindTexture?", "UnbindTexture?", "LoadWorldData?",
-    "CreateContext?", "DeleteContext?", "Clear", "Start3D", "End3D",
+    "Init", "Term", "BindTexture", "UnbindTexture", "LoadWorldData?",
+    "CreateContext", "DeleteContext", "Clear", "Start3D", "End3D",
     "IsIn3D", "StartOptimized2D", "EndOptimized2D", "IsInOptimized2D",
     "SetOptimized2DBlend", "GetOptimized2DBlend", "SetOptimized2DColor",
     "GetOptimized2DColor", "RenderScene", "RenderCommand", "GetHook",
     "SwapBuffers", "GetInfoFlags", "GetScreenFormat", "CreateSurface",
     "DeleteSurface", "GetSurfaceInfo", "LockSurface", "UnlockSurface",
     "OptimizeSurface", "UnoptimizeSurface", "LockScreen?", "UnlockScreen?",
-    "BlitToScreen?", "WarpToScreen?", "MakeScreenShot",
+    "BlitToScreen", "WarpToScreen?", "MakeScreenShot",
     "ReadConsoleVariables", "BlitFromScreen?",
 };
 
@@ -51,6 +51,7 @@ static HANDLE               g_log = INVALID_HANDLE_VALUE;
 static CRITICAL_SECTION     g_lock;
 static DWORD                g_start_tick;
 static int                  g_lock_ready;
+static volatile LONG        g_last_summary_tick;
 
 /* ------------------------------------------------------------------ */
 /* Logging (Win32 only: no CRT, no floating point)                     */
@@ -136,6 +137,19 @@ static int load_real(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Safe reads of guessed pointer arguments                              */
+/* ------------------------------------------------------------------ */
+static int safe_ptr(const void *p, UINT_PTR n)
+{
+    return (uintptr_t)p >= 0x10000 && !IsBadReadPtr(p, n);
+}
+
+static int safe_str(const char *p)
+{
+    return (uintptr_t)p >= 0x10000 && !IsBadStringPtrA(p, 200);
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-call trace (called from the thunks with all registers saved)     */
 /* ------------------------------------------------------------------ */
 void __cdecl avp2m_trace_enter(int idx, const uint32_t *args)
@@ -147,17 +161,25 @@ void __cdecl avp2m_trace_enter(int idx, const uint32_t *args)
              idx, g_slot_names[idx], n, (unsigned long)args[-1],
              (unsigned long)args[0], (unsigned long)args[1],
              (unsigned long)args[2], (unsigned long)args[3]);
-        if (idx == RS_RenderCommand && args[0] > 0 && args[1]) {
-            /* console command: log argv[0] */
+        /* String arguments are only read after checking the memory is
+         * readable: slot signatures are still partly guessed, and the
+         * tracer must never be the thing that crashes the game. */
+        if (idx == RS_RenderCommand && args[0] > 0 && args[0] < 64) {
             const char *const *argv = (const char *const *)(uintptr_t)args[1];
-            if (argv[0]) tlog("        command: %.200s", argv[0]);
-        } else if (idx == RS_GetHook && args[0]) {
+            if (safe_ptr(argv, sizeof(char *)) && safe_str(argv[0]))
+                tlog("        command: %.200s", argv[0]);
+        } else if (idx == RS_GetHook && safe_str((const char *)(uintptr_t)args[0])) {
             tlog("        string: %.200s", (const char *)(uintptr_t)args[0]);
         }
     }
 
-    if (idx == RS_SwapBuffers && (n % SUMMARY_EVERY) == 0)
-        log_summary("periodic");
+    if (idx == RS_SwapBuffers) {
+        LONG now = (LONG)GetTickCount();
+        LONG last = g_last_summary_tick;
+        if (now - last >= SUMMARY_EVERY_MS &&
+            InterlockedCompareExchange(&g_last_summary_tick, now, last) == last)
+            log_summary("periodic");
+    }
     if (idx == RS_Term)
         log_summary("Term");
 }
@@ -257,6 +279,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, LPVOID reserved)
     if (reason == DLL_PROCESS_ATTACH) {
         g_self = inst;
         g_start_tick = GetTickCount();
+        g_last_summary_tick = (LONG)g_start_tick;
         InitializeCriticalSection(&g_lock);
         g_lock_ready = 1;
         DisableThreadLibraryCalls(inst);
