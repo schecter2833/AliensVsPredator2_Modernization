@@ -5,10 +5,11 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 ## Phase 0: Baseline and research
 - [x] Inventory the retail binaries (imports, exports, RTTI). See [FINDINGS.md](FINDINGS.md).
 - [x] REZ archive reader (`tools/rez.py`)
-- [ ] Reference install: AVP2 1.0.9.6 + SP/MP map updates + Primal Hunt
-- [ ] Record SHA-256 hashes of every 1.0.9.6 and Primal Hunt binary (`docs/hashes.md`), so contributors can confirm they're analyzing the same build
+- [x] Reference install: AVP2 1.0.9.6 + SP/MP map updates + Primal Hunt
+- [x] Record SHA-256 hashes of every 1.0.9.6 and Primal Hunt binary ([hashes.md](hashes.md)), so contributors can confirm they're analyzing the same build
 - [ ] Ghidra project setup guide, with shared symbol/type exports (names and types only, no decompiled code)
-- [ ] Document how the Primal Hunt binaries differ from AVP2 1.0.9.6
+- [x] Identify that Primal Hunt uses its own engine build (see FINDINGS.md)
+- [ ] Diff the AVP2 vs Primal Hunt engine interfaces (function tables, struct sizes)
 
 ## Phase 1: Replacement renderer (`d3d.ren`)
 Client-side only, so no effect on multiplayer.

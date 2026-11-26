@@ -1,6 +1,24 @@
 # Findings
 
-Analysis of the **retail 1.0** English install (files dated 2001-10-09). Results for 1.0.9.6 and Primal Hunt are still to come and will be added here.
+Reference builds: **AVP2 English 1.0.9.6** (with SP/MP Map Update #1) and **Primal Hunt** retail. Exact hashes are in [hashes.md](hashes.md).
+
+## Two engine builds, not one
+
+Primal Hunt installs to **its own folder** with its own, newer engine build. So the project has to support two sets of engine binaries:
+
+| Binary | AVP2 1.0.9.6 (link date) | Primal Hunt (link date) |
+|---|---|---|
+| `lithtech.exe` | 937,984 B (2002-04-17) | 1,007,616 B (2002-05-20) |
+| `d3d.ren` | 348,160 B (2002-02-07) | 364,544 B (2002-06-03) |
+| `server.dll` | 557,056 B (2002-04-17) | 610,304 B (2002-05-07) |
+| `CShell.DLL` (RTTI classes) | 2,084,864 B (277) | 2,183,168 B (284) |
+| `Object.LTO` (RTTI classes) | 3,198,976 B (444) | 3,375,104 B (471) |
+
+Both builds export the same interfaces (same export names on the renderer, server and game modules), and both renderers use Direct3D 7 via `DDRAW.dll`. That makes it likely that one replacement renderer and one hook layer can serve both games, with a small table of per-build offsets. This still needs to be confirmed by comparing the `RenderDLLSetup` function tables.
+
+Primal Hunt also ships `cdaudio.dll`, localized `Su*.dll` resource DLLs, and its own `AVP2X.REZ` / `DIALOGUE.REZ` content.
+
+The 1.0 retail binaries below were analyzed first. The interface conclusions carry over to 1.0.9.6.
 
 ## Binary layout
 
