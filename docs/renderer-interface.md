@@ -96,6 +96,44 @@ Worked out from the stock renderer and confirmed by running our own renderer in 
 - **The menu background is 3D:** menu frames call `RenderScene` before drawing text. The legal/splash screen is a single CPU-composited 640×480 surface.
 - **Video playback** uses `GetHook("LPDIRECTDRAW")` and `GetHook("BACKBUFFER")`. Returning NULL makes the engine skip videos without crashing.
 
+## 3D contract (in progress, milestone 2)
+
+**Render context.** CreateContext's init block starts with the engine's world pointer. The stock renderer keeps it at `context+8` and builds its render data from it.
+
+**World data** (read-only from the renderer):
+
+| Where | Field |
+|---|---|
+| world `+0x18C` / `+0x190` | array of BSP entries / count (294 in "Unwelcome Guests"); entry `+4` is a WorldBsp |
+| WorldBsp `+0xA0` / `+0xA4` | `WorldPoly**` / count |
+| WorldBsp `+0x88` / `+0x8C` | 0x30-byte records / count (lights, tentative) |
+| WorldPoly `+0x14` | u16 flags |
+| WorldPoly `+0x28` | plane pointer (normal xyz, dist) |
+| WorldPoly `+0x2C` | Surface pointer (surface `+0x30` = flags) |
+| WorldPoly `+0x38` | lightmap origin vector (tentative) |
+| WorldPoly `+0x4C` / `+0x4D` | lightmap width / height in texels |
+| WorldPoly `+0x50` / `+0x54` | vertex array (0x18 bytes each, normally inline at `+0x58`) / u16 count (`+0x56`: extra clip vertices) |
+| poly vertex `+0` | pointer to position (3 floats) |
+
+**SceneDesc** (argument of RenderScene):
+
+| Offset | Field |
+|---|---|
+| `0x00` | draw mode: 1 = world + visible objects, 2 = object list only (menus) |
+| `0x34` | render context |
+| `0x38`–`0x4C` | global light color/direction (tentative) |
+| `0x50` | global light scale (3 floats, 0–1) |
+| `0x5C` | global light add (3 floats, 0–1) |
+| `0x68` | fog/ambient color (3 floats, 0–255, tentative) |
+| `0xBC` | viewport rect (4 ints) |
+| `0xCC` / `0xD0` | horizontal / vertical FOV (radians) |
+| `0xD4` | far Z (30000 in AVP2) |
+| `0xD8` | camera position (3 floats) |
+| `0xE4` | camera rotation (quaternion x, y, z, w) |
+| `0xF4` / `0xF8` | object list / count (draw mode 2) |
+
+The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaternion → basis conversion in `avp2m_d3d11.c` is confirmed in game: moving and mouse-look both behave correctly.
+
 ## Next steps
 
 - [x] Map the slot layout in both builds
@@ -105,5 +143,7 @@ Worked out from the stock renderer and confirmed by running our own renderer in 
 - [ ] Slots never seen at runtime yet: 4, 13, 15, 17, 19, 22, 30, 31, 32, 34, 35 (screenshot, console commands, alt paths)
 - [ ] Map the 14 engine callbacks
 - [x] Start the D3D11 renderer against `render_struct.h`: milestone 1 (2D + presentation) works in AVP2
-- [ ] Milestone 2: `RenderScene`, i.e. the world, models, sprites and effects (requires mapping `SceneDesc` and the engine's world/model data)
+- [x] Milestone 2, step 1: SceneDesc camera + world geometry (flat-shaded, all BSPs, no culling) renders in game
+- [ ] Milestone 2, step 2: world textures (surface texture + UV mapping, texture upload via BindTexture)
+- [ ] Step 3: lightmaps; step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

@@ -20,10 +20,11 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <math.h>
 
 #include "../render_struct.h"
 
-#define RENDERER_VERSION "0.1.0"
+#define RENDERER_VERSION "0.2.0-dev"
 #define MAX_QUADS_PER_BATCH 4096
 
 /* ------------------------------------------------------------------ */
@@ -101,6 +102,23 @@ static UINT g_vb_pos;                          /* in vertices */
 
 static Surface g_surfaces = { 0 };             /* list head   */
 
+/* 3D world (milestone 2, step 1: untextured geometry) */
+typedef struct WVertex { float x, y, z; uint32_t rgba; } WVertex;
+typedef struct RenderContext {
+    void *world;                     /* engine world (first field of the init block) */
+    ID3D11Buffer *vb;
+    UINT vcount;
+    int built;
+} RenderContext;
+static RenderContext *g_cur_ctx;
+static ID3D11VertexShader *g_vs3d;
+static ID3D11PixelShader  *g_ps3d;
+static ID3D11InputLayout  *g_layout3d;
+static ID3D11Buffer       *g_cb3d;
+static ID3D11Texture2D    *g_depth_tex;
+static ID3D11DepthStencilView *g_dsv;
+static ID3D11DepthStencilState *g_ds_on, *g_ds_off;
+
 static int g_in3d, g_in_opt2d;
 static int g_opt_blend = OPT2D_ALPHA;
 static uint32_t g_opt_color = 0xFFFFFFFFu;     /* A8R8G8B8 */
@@ -130,6 +148,13 @@ static int cvar_int(const char *name, int def)
 /* ------------------------------------------------------------------ */
 /* Shaders                                                              */
 /* ------------------------------------------------------------------ */
+static const char k_hlsl3d[] =
+    "cbuffer C : register(b0) { float4x4 vp; };\n"
+    "struct VI { float3 p : POSITION; float4 c : COLOR; };\n"
+    "struct VO { float4 p : SV_Position; float4 c : COLOR; };\n"
+    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.c = i.c; return o; }\n"
+    "float4 ps(VO i) : SV_Target { return i.c; }\n";
+
 static const char k_hlsl[] =
     "cbuffer C : register(b0) { float4 xf; };\n"
     "Texture2D t : register(t0); SamplerState s : register(s0);\n"
@@ -171,6 +196,23 @@ static int create_shaders(void)
         hr = ID3D11Device_CreateInputLayout(g_dev, il, 3, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout);
     ID3D10Blob_Release(vsb);
     ID3D10Blob_Release(psb);
+    if (FAILED(hr)) return 0;
+
+    {
+        D3D11_INPUT_ELEMENT_DESC il3[2] = {
+            { "POSITION", 0, DXGI_FORMAT_R32G32B32_FLOAT, 0, 0,  D3D11_INPUT_PER_VERTEX_DATA, 0 },
+            { "COLOR",    0, DXGI_FORMAT_R8G8B8A8_UNORM,  0, 12, D3D11_INPUT_PER_VERTEX_DATA, 0 },
+        };
+        vsb = psb = err = NULL;
+        hr = compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "vs", "vs_4_0", 0, 0, &vsb, &err);
+        if (SUCCEEDED(hr)) hr = compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "ps", "ps_4_0", 0, 0, &psb, &err);
+        if (FAILED(hr)) { rlog("3D shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?"); return 0; }
+        hr = ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), NULL, &g_vs3d);
+        if (SUCCEEDED(hr)) hr = ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(psb), ID3D10Blob_GetBufferSize(psb), NULL, &g_ps3d);
+        if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 2, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
+        ID3D10Blob_Release(vsb);
+        ID3D10Blob_Release(psb);
+    }
     return SUCCEEDED(hr);
 }
 
@@ -218,6 +260,24 @@ static int create_objects(void)
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb))) return 0;
+
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = 64;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
+    {
+        D3D11_DEPTH_STENCIL_DESC dd;
+        memset(&dd, 0, sizeof dd);
+        dd.DepthEnable = TRUE;
+        dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
+        dd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
+        ID3D11Device_CreateDepthStencilState(g_dev, &dd, &g_ds_on);
+        dd.DepthEnable = FALSE;
+        dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        ID3D11Device_CreateDepthStencilState(g_dev, &dd, &g_ds_off);
+    }
 
     memset(&sd, 0, sizeof sd);
     sd.Filter = D3D11_FILTER_MIN_MAG_MIP_POINT;
@@ -272,7 +332,11 @@ static int create_game_target(void)
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_rt_tex))) return 0;
     ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_rtv);
     ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_srv);
-    return g_rt_rtv && g_rt_srv;
+    td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
+    td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_tex)))
+        ID3D11Device_CreateDepthStencilView(g_dev, (ID3D11Resource *)g_depth_tex, NULL, &g_dsv);
+    return g_rt_rtv && g_rt_srv && g_dsv;
 }
 
 static int create_backbuffer_view(void)
@@ -384,6 +448,15 @@ static void release_device(void)
     SAFE_RELEASE(g_layout, ID3D11InputLayout);
     SAFE_RELEASE(g_ps, ID3D11PixelShader);
     SAFE_RELEASE(g_vs, ID3D11VertexShader);
+    if (g_cur_ctx) { SAFE_RELEASE(g_cur_ctx->vb, ID3D11Buffer); g_cur_ctx->built = 0; }
+    SAFE_RELEASE(g_dsv, ID3D11DepthStencilView);
+    SAFE_RELEASE(g_depth_tex, ID3D11Texture2D);
+    SAFE_RELEASE(g_ds_on, ID3D11DepthStencilState);
+    SAFE_RELEASE(g_ds_off, ID3D11DepthStencilState);
+    SAFE_RELEASE(g_cb3d, ID3D11Buffer);
+    SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
+    SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
+    SAFE_RELEASE(g_vs3d, ID3D11VertexShader);
     SAFE_RELEASE(g_rt_srv, ID3D11ShaderResourceView);
     SAFE_RELEASE(g_rt_rtv, ID3D11RenderTargetView);
     SAFE_RELEASE(g_rt_tex, ID3D11Texture2D);
@@ -450,6 +523,7 @@ static void bind_pipeline(ID3D11RenderTargetView *rtv, float w, float h, ID3D11S
     D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
     UINT stride = sizeof(Vertex), offset = 0;
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_off, 0);
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
     ID3D11DeviceContext_RSSetState(g_ctx, g_rast);
     ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout);
@@ -561,6 +635,214 @@ static int upload_surface(Surface *s, uint32_t key)
     return 1;
 }
 
+
+/* ------------------------------------------------------------------ */
+/* 3D world: geometry from the engine's world data                      */
+/* Layouts (AVP2 1.0.9.6 / PH, see docs/renderer-interface.md):         */
+/*   world+0x18C  entry** bsps, world+0x190 count, entry+4 -> WorldBsp  */
+/*   bsp+0xA0     WorldPoly** polies, bsp+0xA4 count                    */
+/*   poly+0x28    float *plane (normal xyz, dist)                       */
+/*   poly+0x2C    Surface*                                              */
+/*   poly+0x50    vertex array (0x18 bytes each), poly+0x54 u16 count   */
+/*   vertex+0     float *pos (xyz)                                      */
+/* Every pointer is validated before it is read.                        */
+/* ------------------------------------------------------------------ */
+static int readable(const void *p, UINT_PTR n)
+{
+    return (uintptr_t)p >= 0x10000 && !IsBadReadPtr(p, n);
+}
+
+#define RD32(base, off) (*(const uint32_t *)((const uint8_t *)(base) + (off)))
+#define RDPTR(base, off) ((const uint8_t *)(uintptr_t)RD32(base, off))
+
+static uint32_t shade(const float *n, const void *surface)
+{
+    /* Flat shading by normal with a fixed light; tinted per surface so
+     * different surfaces are distinguishable. */
+    float l = 0.35f + 0.65f * (0.5f + 0.5f * (n[1] * 0.8f + n[0] * 0.36f + n[2] * 0.48f));
+    uint32_t h = (uint32_t)(uintptr_t)surface * 2654435761u;
+    float r = l * (0.75f + 0.25f * ((h >> 8) & 0xFF) / 255.0f);
+    float g = l * (0.75f + 0.25f * ((h >> 16) & 0xFF) / 255.0f);
+    float b = l * (0.75f + 0.25f * ((h >> 24) & 0xFF) / 255.0f);
+    return 0xFF000000u | ((uint32_t)(b * 255) << 16) | ((uint32_t)(g * 255) << 8) | (uint32_t)(r * 255);
+}
+
+static void build_world(RenderContext *rc)
+{
+    const uint8_t *world = (const uint8_t *)rc->world;
+    const uint8_t *list;
+    uint32_t nbsp, b, total_polys = 0, skipped = 0;
+    WVertex *verts = NULL;
+    size_t cap = 0, n = 0;
+
+    rc->built = 1;
+    if (!readable(world, 0x194)) { rlog("world: bad world pointer %p", (void *)world); return; }
+    list = RDPTR(world, 0x18C);
+    nbsp = RD32(world, 0x190);
+    if (nbsp > 4096 || !readable(list, nbsp * 4)) { rlog("world: bad bsp list %p n=%lu", (void *)list, (unsigned long)nbsp); return; }
+
+    for (b = 0; b < nbsp; b++) {
+        const uint8_t *entry = RDPTR(list, b * 4), *bsp, *polies;
+        uint32_t np, i;
+        if (!readable(entry, 8)) continue;
+        bsp = RDPTR(entry, 4);
+        if (!readable(bsp, 0xA8)) continue;
+        polies = RDPTR(bsp, 0xA0);
+        np = RD32(bsp, 0xA4);
+        if (np > 2000000 || !readable(polies, np * 4)) { skipped++; continue; }
+        for (i = 0; i < np; i++) {
+            const uint8_t *poly = RDPTR(polies, i * 4), *vlist, *surface;
+            const float *plane;
+            uint32_t nv, k, rgba;
+            const float *p0;
+            if (!readable(poly, 0x58)) { skipped++; continue; }
+            vlist = RDPTR(poly, 0x50);
+            nv = *(const uint16_t *)(poly + 0x54);
+            plane = (const float *)RDPTR(poly, 0x28);
+            surface = RDPTR(poly, 0x2C);
+            if (nv < 3 || nv > 64 || !readable(vlist, nv * 0x18) || !readable(plane, 12)) { skipped++; continue; }
+            rgba = shade(plane, surface);
+            p0 = (const float *)RDPTR(vlist, 0);
+            if (!readable(p0, 12)) { skipped++; continue; }
+            if (n + (nv - 2) * 3 > cap) {
+                size_t ncap = cap ? cap * 2 : 65536;
+                while (ncap < n + (nv - 2) * 3) ncap *= 2;
+                verts = (WVertex *)realloc(verts, ncap * sizeof *verts);
+                if (!verts) { rlog("world: out of memory"); return; }
+                cap = ncap;
+            }
+            for (k = 1; k + 1 < nv; k++) {
+                const float *p1 = (const float *)RDPTR(vlist, k * 0x18);
+                const float *p2 = (const float *)RDPTR(vlist, (k + 1) * 0x18);
+                if (!readable(p1, 12) || !readable(p2, 12)) break;
+                verts[n].x = p0[0]; verts[n].y = p0[1]; verts[n].z = p0[2]; verts[n].rgba = rgba; n++;
+                verts[n].x = p1[0]; verts[n].y = p1[1]; verts[n].z = p1[2]; verts[n].rgba = rgba; n++;
+                verts[n].x = p2[0]; verts[n].y = p2[1]; verts[n].z = p2[2]; verts[n].rgba = rgba; n++;
+            }
+            total_polys++;
+        }
+    }
+
+    if (n) {
+        D3D11_BUFFER_DESC bd;
+        D3D11_SUBRESOURCE_DATA init;
+        memset(&bd, 0, sizeof bd);
+        bd.ByteWidth = (UINT)(n * sizeof(WVertex));
+        bd.Usage = D3D11_USAGE_IMMUTABLE;
+        bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        init.pSysMem = verts;
+        init.SysMemPitch = init.SysMemSlicePitch = 0;
+        if (SUCCEEDED(ID3D11Device_CreateBuffer(g_dev, &bd, &init, &rc->vb))) rc->vcount = (UINT)n;
+    }
+    free(verts);
+    rlog("world: %lu bsps, %lu polygons -> %lu triangles (%lu skipped)", (unsigned long)nbsp,
+         (unsigned long)total_polys, (unsigned long)(n / 3), (unsigned long)skipped);
+}
+
+/* SceneDesc fields used so far (dword offsets into the engine's struct). */
+#define SD_DRAWMODE   0x00
+#define SD_CONTEXT    0x34
+#define SD_RECT       0xBC
+#define SD_XFOV       0xCC
+#define SD_YFOV       0xD0
+#define SD_FARZ       0xD4
+#define SD_POS        0xD8
+#define SD_ROT        0xE4
+
+static void quat_basis(const float *q, float *right, float *up, float *fwd)
+{
+    float x = q[0], y = q[1], z = q[2], w = q[3];
+    right[0] = 1 - 2 * (y * y + z * z); right[1] = 2 * (x * y + w * z);     right[2] = 2 * (x * z - w * y);
+    up[0]    = 2 * (x * y - w * z);     up[1]    = 1 - 2 * (x * x + z * z); up[2]    = 2 * (y * z + w * x);
+    fwd[0]   = 2 * (x * z + w * y);     fwd[1]   = 2 * (y * z - w * x);     fwd[2]   = 1 - 2 * (x * x + y * y);
+}
+
+static void render_world(const uint8_t *sd)
+{
+    RenderContext *rc;
+    const float *pos, *rot;
+    float xfov, yfov, farz, nearz = 1.0f, sx, sy, a, bq;
+    float r[3], u[3], f[3], m[16];
+    const int32_t *rect;
+    D3D11_VIEWPORT vp;
+    D3D11_MAPPED_SUBRESOURCE map;
+    UINT stride = sizeof(WVertex), offset = 0;
+    float bf[4] = { 0, 0, 0, 0 };
+    static int logged;
+
+    if (!readable(sd, 0xF4) || RD32(sd, SD_DRAWMODE) != 1) return;
+    rc = (RenderContext *)RDPTR(sd, SD_CONTEXT);
+    if (!rc || rc != g_cur_ctx) return;
+    if (!rc->built) build_world(rc);
+    if (!rc->vb) return;
+
+    pos = (const float *)(sd + SD_POS);
+    rot = (const float *)(sd + SD_ROT);
+    rect = (const int32_t *)(sd + SD_RECT);
+    xfov = *(const float *)(sd + SD_XFOV);
+    yfov = *(const float *)(sd + SD_YFOV);
+    farz = *(const float *)(sd + SD_FARZ);
+    if (!(farz > 10.0f && farz < 1e7f)) farz = 10000.0f;
+    if (!(xfov > 0.05f && xfov < 3.1f)) xfov = 1.5708f;
+    if (!(yfov > 0.05f && yfov < 3.1f)) yfov = 1.1781f;
+    if (logged < 3) {
+        rlog("scene: pos %d,%d,%d rot %d,%d,%d,%d (x1000) fov %d,%d (mrad) far %d rect %ld,%ld,%ld,%ld",
+             (int)pos[0], (int)pos[1], (int)pos[2], (int)(rot[0] * 1000), (int)(rot[1] * 1000),
+             (int)(rot[2] * 1000), (int)(rot[3] * 1000), (int)(xfov * 1000), (int)(yfov * 1000), (int)farz,
+             (long)rect[0], (long)rect[1], (long)rect[2], (long)rect[3]);
+        logged++;
+    }
+
+    flush_batch();
+    quat_basis(rot, r, u, f);
+    sx = 1.0f / (float)tan(xfov * 0.5);
+    sy = 1.0f / (float)tan(yfov * 0.5);
+    a = farz / (farz - nearz);
+    bq = -nearz * farz / (farz - nearz);
+    /* row-vector convention: clip = [x y z 1] * M, M = View * Proj */
+    m[0] = r[0] * sx; m[1] = u[0] * sy; m[2]  = f[0] * a; m[3]  = f[0];
+    m[4] = r[1] * sx; m[5] = u[1] * sy; m[6]  = f[1] * a; m[7]  = f[1];
+    m[8] = r[2] * sx; m[9] = u[2] * sy; m[10] = f[2] * a; m[11] = f[2];
+    {
+        float tx = -(pos[0] * r[0] + pos[1] * r[1] + pos[2] * r[2]);
+        float ty = -(pos[0] * u[0] + pos[1] * u[1] + pos[2] * u[2]);
+        float tz = -(pos[0] * f[0] + pos[1] * f[1] + pos[2] * f[2]);
+        m[12] = tx * sx; m[13] = ty * sy; m[14] = tz * a + bq; m[15] = tz;
+    }
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb3d, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        /* HLSL mul(v, M) with default column-major packing needs the transpose */
+        float *o = (float *)map.pData;
+        int i, j;
+        for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) o[i * 4 + j] = m[j * 4 + i];
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb3d, 0);
+    }
+
+    vp.TopLeftX = (float)rect[0];
+    vp.TopLeftY = (float)rect[1];
+    vp.Width = (float)(rect[2] - rect[0]);
+    vp.Height = (float)(rect[3] - rect[1]);
+    vp.MinDepth = 0;
+    vp.MaxDepth = 1;
+    if (vp.Width <= 0 || vp.Height <= 0) { vp.TopLeftX = vp.TopLeftY = 0; vp.Width = (float)g_w; vp.Height = (float)g_h; }
+
+    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rt_rtv, g_dsv);
+    ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_on, 0);
+    ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[OPT2D_SOLID], bf, 0xFFFFFFFFu);
+    ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
+    ID3D11DeviceContext_RSSetState(g_ctx, g_rast);
+    ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout3d);
+    ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+    ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 1, &rc->vb, &stride, &offset);
+    ID3D11DeviceContext_VSSetShader(g_ctx, g_vs3d, NULL, 0);
+    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
+    ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
+    ID3D11DeviceContext_Draw(g_ctx, rc->vcount, 0);
+
+    /* back to the 2D pipeline */
+    g_batch_srv = NULL;
+    begin_game_pass();
+}
+
 /* ------------------------------------------------------------------ */
 /* Slot implementations                                                 */
 /* ------------------------------------------------------------------ */
@@ -619,6 +901,8 @@ static void __cdecl r_term(int full)
 static void __cdecl r_clear(LTRect *rect, uint32_t flags, const float *color)
 {
     float c[4] = { 0, 0, 0, 1 };
+    if (g_ctx && g_dsv && (flags & CLEAR_DEPTH))
+        ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     if (!g_ctx || !(flags & CLEAR_SCREEN)) return;
     if (color) { c[0] = color[0] / 255.0f; c[1] = color[1] / 255.0f; c[2] = color[2] / 255.0f; }
     if (!rect || (rect->left <= 0 && rect->top <= 0 &&
@@ -650,7 +934,7 @@ static int __cdecl r_get_opt2d_blend(int *mode)        { if (mode) *mode = g_opt
 static int __cdecl r_set_opt2d_color(uint32_t argb)    { g_opt_color = argb | 0xFF000000u; return 1; }
 static int __cdecl r_get_opt2d_color(uint32_t *argb)   { if (argb) *argb = g_opt_color; return 1; }
 
-static int __cdecl r_render_scene(void *scene)         { (void)scene; return 1; /* milestone 2 */ }
+static int __cdecl r_render_scene(void *scene)         { if (g_ctx) render_world((const uint8_t *)scene); return 1; }
 static void __cdecl r_render_command(int argc, char **argv) { (void)argc; (void)argv; }
 
 static void *__cdecl r_get_hook(const char *name)
@@ -847,8 +1131,23 @@ static void __cdecl r_blit_to_screen(BlitRequest *req)
 static int  __cdecl r_bind_texture(void *tex, int changed)   { (void)tex; (void)changed; return 1; }
 static void __cdecl r_unbind_texture(void *tex)              { (void)tex; }
 static int  __cdecl r_load_world_data(void *p)               { (void)p; return 1; }
-static void *__cdecl r_create_context(void *init)            { (void)init; return calloc(1, 16); }
-static void __cdecl r_delete_context(void *ctx)              { free(ctx); }
+static void *__cdecl r_create_context(void *init)
+{
+    RenderContext *rc = (RenderContext *)calloc(1, sizeof *rc);
+    if (!rc) return NULL;
+    rc->world = readable(init, 4) ? (void *)(uintptr_t)RD32(init, 0) : NULL;
+    g_cur_ctx = rc;
+    rlog("CreateContext: world %p", rc->world);
+    return rc;
+}
+static void __cdecl r_delete_context(void *ctx)
+{
+    RenderContext *rc = (RenderContext *)ctx;
+    if (!rc) return;
+    if (rc == g_cur_ctx) g_cur_ctx = NULL;
+    if (rc->vb) ID3D11Buffer_Release(rc->vb);
+    free(rc);
+}
 static void *__cdecl r_lock_screen(void)                     { return NULL; }
 static void __cdecl r_unlock_screen(void)                    { }
 static int  __cdecl r_warp_to_screen(void *req)              { (void)req; return 0; }
