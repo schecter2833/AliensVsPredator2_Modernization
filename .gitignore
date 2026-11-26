@@ -1,0 +1,35 @@
+# NEVER commit game files. This project ships only original code.
+*.rez
+*.REZ
+*.ren
+*.REN
+*.lto
+*.LTO
+*.dll
+*.DLL
+*.exe
+*.EXE
+*.dat
+*.DAT
+*.dtx
+*.abc
+*.wav
+*.bik
+*.smk
+*.zip
+*.gz
+# Ghidra / IDA databases may embed game code
+*.gpr
+*.rep/
+*.idb
+*.i64
+# Extracted game data
+extracted/
+gamedata/
+# Build output
+build/
+out/
+*.obj
+*.pdb
+*.ilk
+__pycache__/
