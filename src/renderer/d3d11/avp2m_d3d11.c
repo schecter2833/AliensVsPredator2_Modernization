@@ -1018,6 +1018,7 @@ static void cross3(const float *a, const float *b, float *o)
 }
 
 static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
+static const uint8_t *obj_model(const uint8_t *o);
 static int lm_decode(const uint8_t *src, uint32_t size, uint32_t *dst, uint32_t count)
 {
     const uint8_t *end = src + size;
@@ -1837,7 +1838,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
         uint32_t nnodes, npieces, pi;
         float om[12];
         if (o[OBJ_TYPE] != 1 || !readable(o, 0x200) || o[0x97] == 0) continue;
-        m = RDPTR(o, 0x1F8);
+        m = obj_model(o);
         if (!readable(m, 0x80)) continue;
         nnodes = RD32(m, 0x2C);
         npieces = RD32(m, 0x3C);
@@ -3106,13 +3107,48 @@ static int cmp_ptr(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+/* Model objects keep their Model pointer at +0x1F8 in AVP2 and at +0x1FC in
+ * Primal Hunt, whose engine build inserts a field near +0x1D0 (the stock PH
+ * d3d.ren reads +0x1FC and +0x1D4 where AVP2's reads +0x1F8 and +0x1D0).
+ * Decided on the first model seen: the right slot points at a Model whose
+ * first dword is a vtable inside the engine executable. */
+static uint32_t g_model_off;
+static int in_exe_image(uintptr_t v)
+{
+    static uintptr_t lo, hi;
+    if (!lo) {
+        const uint8_t *b = (const uint8_t *)GetModuleHandleA(NULL);
+        const uint8_t *nt = b + *(const uint32_t *)(b + 0x3C);
+        lo = (uintptr_t)b;
+        hi = lo + *(const uint32_t *)(nt + 0x50);   /* SizeOfImage */
+    }
+    return v >= lo && v < hi;
+}
+static const uint8_t *obj_model(const uint8_t *o)
+{
+    if (!g_model_off) {
+        static const uint32_t cand[2] = { 0x1F8, 0x1FC };
+        int k;
+        for (k = 0; k < 2; k++) {
+            const uint8_t *m = RDPTR(o, cand[k]);
+            if (readable(m, 0x80) && in_exe_image(RD32(m, 0))) {
+                g_model_off = cand[k];
+                rlog("model objects: Model pointer at +0x%lX", (unsigned long)g_model_off);
+                break;
+            }
+        }
+        if (!g_model_off) return RDPTR(o, 0x1F8);
+    }
+    return RDPTR(o, g_model_off);
+}
+
 /* Diagnostics for the model format: the object's model (+0x1F8), its
  * animated node transforms (object vtable slot 18, thiscall, no arguments;
  * count at model+0x78) and candidate piece arrays. */
 typedef const float *(__fastcall *PFN_GetNodeTransforms)(void *self, void *edx);
 static void dump_model(uint8_t *o)
 {
-    const uint8_t *m = RDPTR(o, 0x1F8);
+    const uint8_t *m = obj_model(o);
     uint32_t nn, k;
     rlog("model object %p, model %p, tracker +1d0:", (void *)o, (void *)m);
     rlog_dump("  trk", o + 0x1D0, 0x60);
@@ -3128,6 +3164,7 @@ static void dump_model(uint8_t *o)
             }
         }
     }
+    if (!readable(m, 0x180)) { rlog("  mdl %p: unreadable", (const void *)m); return; }
     rlog_dump("  mdl", m, 0x180);
     nn = RD32(m, 0x78);
     if (readable(RDPTR(o, 0), 0x4C) && nn && nn < 256) {

@@ -12,7 +12,8 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 - [x] Identify that Primal Hunt uses its own engine build (see FINDINGS.md)
 - [x] Capture the Primal Hunt launcher's `avp2cmds.txt` (exact `-rez` list); retest the Zeta Site load crash
 - [x] Fix the Zeta Site load crash (bug in PH `object.lto`, fixed in memory by `src/compat/game_fixes.c`)
-- [ ] Run Primal Hunt with the D3D11 renderer
+- [x] Run Primal Hunt with the D3D11 renderer (model pointer at +0x1FC)
+- [ ] PH menus: background images fill the screen; 3D character portrait
 - [ ] Diff the AVP2 vs Primal Hunt engine interfaces (function tables, struct sizes)
 
 ## Phase 1: Replacement renderer (`d3d.ren`)

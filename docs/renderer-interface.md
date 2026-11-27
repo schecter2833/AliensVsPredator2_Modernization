@@ -345,3 +345,17 @@ whose refs point at such an anim with non-zero data (348 lightmapped and 899 ver
 that level) and relights them, with the same combining code, whenever an anim changes. Note: the
 vertex-lit polygons there store full white (255) for the base and both flicker anims, so they
 saturate and don't visibly flicker.
+
+## Primal Hunt differences
+
+Primal Hunt's engine build (render struct at `0x004F5A48`) inserts a 4-byte field in model objects near
+`+0x1D0`: the stock PH `d3d.ren` reads the Model pointer at `+0x1FC` and the animation block at `+0x1D4`,
+where AVP2's reads `+0x1F8` and `+0x1D0`. Skins (`+0x1C0`) and the other object types use the same offsets
+(compared by counting every `[reg + disp]` use in both stock renderers). The D3D11 renderer picks the
+model offset on the first model it sees (the slot that points at a Model whose first dword is a vtable in
+the engine executable).
+
+Status: with the in-memory `object.lto` fix, Zeta Site loads and plays with the D3D11 renderer (world,
+skinned models, attachments, subtitles). Known PH-only issues: menu background images are drawn at their
+native size in the middle of the screen instead of filling it, and the 3D character portrait on the
+single-player menu isn't drawn.
