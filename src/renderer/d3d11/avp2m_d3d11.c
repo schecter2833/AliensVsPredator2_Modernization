@@ -1858,7 +1858,8 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
 #define SPR_ADD   0
 #define SPR_MUL   1
 #define SPR_ALPHA 2
-typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first; } SprDraw;
+#define SPR_SOLID 3
+typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first, count; int nodepth; } SprDraw;
 static float g_spr_scale = 0.5f;        /* half size per texel per unit scale (tunable) */
 static float g_particle_scale = 1.0f;   /* extra particle size multiplier; cvar avp2m_psize x100 */
 static float g_cur_xfov = 1.5708f;      /* horizontal FOV of the current scene (radians) */
@@ -1866,16 +1867,170 @@ static float g_cur_xfov = 1.5708f;      /* horizontal FOV of the current scene (
 static int cmp_spr(const void *a, const void *b)
 {
     const SprDraw *p = (const SprDraw *)a, *q = (const SprDraw *)b;
-    if (p->blend != q->blend) return p->blend - q->blend;   /* additive first, then far-to-near alpha */
+    if (p->blend != q->blend) {   /* opaque, additive, multiply, then far-to-near alpha */
+        int pa = p->blend == SPR_SOLID ? -1 : p->blend, qa = q->blend == SPR_SOLID ? -1 : q->blend;
+        return pa - qa;
+    }
     return (p->depth < q->depth) - (p->depth > q->depth);
 }
+
+/* Canvases (object type 10) are drawn by the game itself: the renderer calls
+ * the client function at canvas+0x1B0 as fn(iface, canvas, user data at
+ * +0x1B4), and the client draws through iface, a C++ object whose vtable has
+ * five thiscall methods (stock d3d.ren vtable 0x100463C8):
+ *   0 DrawPrimitive(verts, count, flags): triangle fan of 0x20-byte vertices
+ *     {x, y, z, rhw, diffuse ARGB, specular, u, v}; world space unless the
+ *     canvas is "really close" (object flag 0x40) or flags & 0x40, then
+ *     camera space
+ *   1 SetState(state, value)   2 GetState(state, *value)
+ *     0 alpha blend on/off, 1 z test, 2 z write, 3 src blend, 4 dest blend
+ *     (1 zero 2 one 3 src color 4 inv src color 5 src alpha 6 inv src alpha),
+ *     5 texture address, 6 colour op, 7 alpha op
+ *     (1 texture 2 diffuse 3 modulate 4 add 5 add signed)
+ *   3 SetTexture(handle; engine callback 0 maps it to a SharedTexture)
+ *   4 GetTextureSize(int *w, int *h) */
+typedef struct CanvasCtx {
+    WVertex *vv; uint32_t *cc; uint32_t *nv; SprDraw *list; uint32_t *n;
+    const float *campos, *cr, *cu, *cf;
+    const uint8_t *obj; int camspace;
+} CanvasCtx;
+typedef void (__cdecl *CanvasFn)(void *iface, void *canvas, void *user);
+typedef struct CanvasIface { void **vtbl; } CanvasIface;
+static CanvasCtx *g_cv;
+static int32_t g_cv_state[8];
+static RTexture *g_cv_tex;
+static void *g_cv_lasttex;
+static uint32_t g_cv_stat[3];
+static int g_cv_log;
+
+static void cv_reset(void)
+{
+    static const int32_t def[8] = { 0, 1, 1, 5, 6, 1, 3, 3 };
+    memcpy(g_cv_state, def, sizeof def);
+    g_cv_tex = NULL;
+}
+
+static int __attribute__((thiscall)) cv_draw(void *self, const float *v, int count, uint32_t flags)
+{
+    CanvasCtx *c = g_cv;
+    int t, k, cam, blend;
+    float dsum = 0;
+    (void)self;
+    g_cv_stat[0]++;
+    if (!c || !v || count < 3) return 1;
+    if (*c->n >= MAX_SPRITES || *c->nv + (uint32_t)(count - 2) * 3 > MAX_SPRITES * 6u) return 0;
+    if (!readable(v, (UINT_PTR)count * 32)) return 1;
+    cam = c->camspace || (flags & 0x40);
+    {
+        static int vlog;
+        if (vlog < 4) {
+            int q;
+            vlog++;
+            rlog("cv prim: %d verts flags %lx cam %d states %ld %ld %ld %ld %ld %ld %ld %ld tex %p campos %d,%d,%d",
+                 count, (unsigned long)flags, cam, (long)g_cv_state[0], (long)g_cv_state[1], (long)g_cv_state[2],
+                 (long)g_cv_state[3], (long)g_cv_state[4], (long)g_cv_state[5], (long)g_cv_state[6], (long)g_cv_state[7],
+                 (void *)g_cv_tex, (int)c->campos[0], (int)c->campos[1], (int)c->campos[2]);
+            for (q = 0; q < count && q < 6; q++)
+                rlog("   v%d %d,%d,%d argb %08lx uv %d,%d (x100)", q, (int)v[q * 8], (int)v[q * 8 + 1], (int)v[q * 8 + 2],
+                     (unsigned long)((const uint32_t *)v)[q * 8 + 4], (int)(v[q * 8 + 6] * 100), (int)(v[q * 8 + 7] * 100));
+        }
+    }
+    {
+        int en = g_cv_state[0], sb = g_cv_state[3], db = g_cv_state[4];
+        if (!en) blend = SPR_SOLID;
+        else if (db == 2) blend = SPR_ADD;                          /* src x factor + dest */
+        else if ((sb == 1 && db == 3) || (sb == 3 && db == 1)) blend = SPR_MUL;
+        else blend = SPR_ALPHA;
+    }
+    {
+        SprDraw *d = &c->list[*c->n];
+        WVertex *w = c->vv + *c->nv;
+        uint32_t *cc = c->cc + *c->nv;
+        int cop = g_cv_state[6], aop = g_cv_state[7];
+        for (t = 0; t < count - 2; t++) {
+            int idx[3];
+            idx[0] = 0; idx[1] = t + 1; idx[2] = t + 2;
+            for (k = 0; k < 3; k++) {
+                const float *sv = v + idx[k] * 8;
+                uint32_t argb = ((const uint32_t *)sv)[4], a, col;
+                float p[3];
+                int q;
+                if (cam) for (q = 0; q < 3; q++) p[q] = c->campos[q] + sv[0] * c->cr[q] + sv[1] * c->cu[q] + sv[2] * c->cf[q];
+                else for (q = 0; q < 3; q++) p[q] = sv[q];
+                w->x = p[0]; w->y = p[1]; w->z = p[2];
+                w->u = sv[6]; w->v = sv[7];
+                w->lu = w->lv = 0; w->rgba = 0;
+                a = argb >> 24;
+                col = ((argb >> 16) & 0xFF) | (argb & 0xFF00) | ((argb & 0xFF) << 16);
+                if (cop == 1) col = 0xFFFFFF;               /* texture only */
+                if (aop == 1) a = 255;
+                *cc++ = col | (a << 24);
+                dsum += (p[0] - c->campos[0]) * c->cf[0] + (p[1] - c->campos[1]) * c->cf[1] + (p[2] - c->campos[2]) * c->cf[2];
+                w++;
+            }
+        }
+        d->tex = (cop == 2) ? NULL : g_cv_tex;
+        d->blend = blend;
+        d->depth = dsum / (float)((count - 2) * 3);
+        d->first = *c->nv;
+        d->count = (uint32_t)(count - 2) * 3;
+        d->nodepth = !g_cv_state[1];
+        *c->nv += d->count;
+        (*c->n)++;
+        g_cv_stat[1] += (uint32_t)(count - 2);
+    }
+    return 0;
+}
+
+static int __attribute__((thiscall)) cv_setstate(void *self, uint32_t st, int32_t val)
+{
+    (void)self;
+    if (st > 7) return 1;
+    g_cv_state[st] = val;
+    return 0;
+}
+
+static int __attribute__((thiscall)) cv_getstate(void *self, uint32_t st, int32_t *val)
+{
+    (void)self;
+    if (st > 7) return 1;
+    if (val) *val = g_cv_state[st];
+    return 0;
+}
+
+static int __attribute__((thiscall)) cv_settexture(void *self, void *shared)
+{
+    (void)self;
+    g_cv_stat[2]++;
+    /* the client passes a texture handle; engine callback 0 (RenderStruct
+       +0x04) turns it into the SharedTexture, as the stock renderer does */
+    g_cv_lasttex = shared;
+    if (shared && g_rs && g_rs->engine_callbacks[0])
+        shared = ((void *(__cdecl *)(void *))(void *)g_rs->engine_callbacks[0])(shared);
+    else
+        shared = NULL;
+    g_cv_tex = shared ? get_texture(shared) : NULL;
+    return !g_cv_tex;
+}
+
+static int __attribute__((thiscall)) cv_texsize(void *self, int32_t *w, int32_t *h)
+{
+    (void)self;
+    if (w) *w = g_cv_tex ? (int32_t)g_cv_tex->w : 0;
+    if (h) *h = g_cv_tex ? (int32_t)g_cv_tex->h : 0;
+    return 0;
+}
+
+static void *g_cv_vtbl[5] = { (void *)cv_draw, (void *)cv_setstate, (void *)cv_getstate,
+                              (void *)cv_settexture, (void *)cv_texsize };
+static CanvasIface g_cv_iface = { g_cv_vtbl };
 
 static void draw_sprites(const float *campos, const float *cr, const float *cu, const float *cf)
 {
     static SprDraw list[MAX_SPRITES];
     D3D11_MAPPED_SUBRESOURCE mv, mc;
     WVertex *vv;
-    uint32_t *cc, i, n = 0, nspr = 0;
+    uint32_t *cc, i, n = 0, nspr = 0, nv = 0, ncv = 0;
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
 
@@ -1927,7 +2082,7 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
         col = (uint32_t)o[0x94] | ((uint32_t)o[0x95] << 8) | ((uint32_t)o[0x96] << 16) | ((uint32_t)o[0x97] << 24);
         {
             static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
-            WVertex *w = vv + n * 6;
+            WVertex *w = vv + nv;
             for (k = 0; k < 6; k++) {
                 int a;
                 for (a = 0; a < 3; a++) (&w[k].x)[a] = p[a] + r[a] * hx * cx[k] + u[a] * hy * cy[k];
@@ -1935,13 +2090,14 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
                 w[k].v = cy[k] > 0 ? 0.0f : 1.0f;
                 w[k].lu = w[k].lv = 0;
                 w[k].rgba = 0;
-                cc[n * 6 + k] = col;
+                cc[nv + k] = col;
             }
         }
         list[n].tex = tex;
         list[n].blend = (fl2 & 4) ? SPR_ADD : (fl2 & 8) ? SPR_MUL : SPR_ALPHA;
         list[n].depth = d;
-        list[n].first = n * 6;
+        list[n].first = nv; list[n].count = 6; list[n].nodepth = 0;
+        nv += 6;
         n++;
     }
 
@@ -1987,7 +2143,7 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
             col = cr8 | (cg8 << 8) | (cb8 << 16) | (ca8 << 24);
             {
                 static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
-                WVertex *w = vv + n * 6;
+                WVertex *w = vv + nv;
                 for (k = 0; k < 6; k++) {
                     int a;
                     for (a = 0; a < 3; a++) (&w[k].x)[a] = p[a] + cr[a] * hs * cx[k] + cu[a] * hs * cy[k];
@@ -1995,14 +2151,53 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
                     w[k].v = cy[k] > 0 ? 0.0f : 1.0f;
                     w[k].lu = w[k].lv = 0;
                     w[k].rgba = 0;
-                    cc[n * 6 + k] = col;
+                    cc[nv + k] = col;
                 }
             }
             list[n].tex = tex;
             list[n].blend = blend;
             list[n].depth = d;
-            list[n].first = n * 6;
+            list[n].first = nv; list[n].count = 6; list[n].nodepth = 0;
+            nv += 6;
             n++;
+        }
+    }
+    {   /* canvases (type 10): the game draws them itself through g_cv_iface */
+        CanvasCtx cx;
+        cx.vv = vv; cx.cc = cc; cx.nv = &nv; cx.list = list; cx.n = &n;
+        cx.campos = campos; cx.cr = cr; cx.cu = cu; cx.cf = cf;
+        g_cv = &cx;
+        for (i = 0; i < g_nvis_objs && n < MAX_SPRITES; i++) {
+            const uint8_t *o = g_vis_objs[i];
+            CanvasFn fn;
+            if (o[OBJ_TYPE] != 10 || !readable(o, 0x1B8)) continue;
+            if (g_cv_log < 3) {
+                rlog("canvas %p: fn %08lx user %08lx flags %08lx flags2 %08lx +188 %08lx pos %d,%d,%d", (const void *)o,
+                     (unsigned long)RD32(o, 0x1B0), (unsigned long)RD32(o, 0x1B4), (unsigned long)RD32(o, OBJ_FLAGS),
+                     (unsigned long)RD32(o, OBJ_FLAGS2), (unsigned long)RD32(o, 0x188),
+                     (int)((const float *)(o + OBJ_POS))[0], (int)((const float *)(o + OBJ_POS))[1], (int)((const float *)(o + OBJ_POS))[2]);
+                g_cv_log++;
+            }
+            if (!RD32(o, 0x1B0)) continue;
+            if (RD32(o, OBJ_FLAGS2) & 0x100) continue;
+            fn = (CanvasFn)(uintptr_t)RD32(o, 0x1B0);
+            cx.obj = o;
+            cx.camspace = (RD32(o, OBJ_FLAGS) & 0x40) != 0;
+            cv_reset();
+            fn(&g_cv_iface, (void *)o, (void *)(uintptr_t)RD32(o, 0x1B4));
+            ncv++;
+        }
+        g_cv = NULL;
+        if (ncv && g_cv_log < 8) {
+            const uint8_t *co = NULL;
+            const float *op;
+            for (i = 0; i < g_nvis_objs && !co; i++) if (g_vis_objs[i][OBJ_TYPE] == 10) co = g_vis_objs[i];
+            op = (const float *)(co + OBJ_POS);
+            rlog("canvas: %lu drawn, %lu prims, %lu tris, settex %lu (last %p ok %d), fn %08lx flags %08lx pos %d,%d,%d",
+                 (unsigned long)ncv, (unsigned long)g_cv_stat[0], (unsigned long)g_cv_stat[1], (unsigned long)g_cv_stat[2],
+                 g_cv_lasttex, g_cv_tex != NULL, (unsigned long)RD32(co, 0x1B0),
+                 (unsigned long)RD32(co, OBJ_FLAGS), (int)op[0], (int)op[1], (int)op[2]);
+            g_cv_log++;
         }
     }
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_vb, 0);
@@ -2017,6 +2212,43 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
             uint32_t q, nsys = 0, quads = n - nspr;
             DWORD now = GetTickCount();
             for (q = 0; q < g_nvis_objs; q++) if (g_vis_objs[q][OBJ_TYPE] == 6) nsys++;
+            {   /* describe each newly seen particle system once (up to 300) and
+                   count object types the renderer doesn't draw yet */
+                static const uint8_t *seen[64];
+                static uint32_t nseen, ndesc, tlast_log;
+                uint32_t tc[16] = { 0 };
+                for (q = 0; q < g_nvis_objs; q++) {
+                    const uint8_t *o = g_vis_objs[q];
+                    uint32_t t = o[OBJ_TYPE], j;
+                    if (t < 16) tc[t]++;
+                    if (t != 6 || ndesc >= 300) continue;
+                    for (j = 0; j < nseen && seen[j] != o; j++) ;
+                    if (j < nseen) continue;
+                    seen[nseen++ % 64] = o; if (nseen > 64) nseen = 64;
+                    {
+                        const uint8_t *pt = readable(o, 0x240) ? RDPTR(o, 0x1D0) : NULL;
+                        void *st = readable(o, 0x240) ? (void *)(uintptr_t)RD32(o, 0x1F0) : NULL;
+                        RTexture *tx = st ? get_texture(st) : NULL;
+                        int sz = -1, a = -1, r = -1, g = -1, b = -1;
+                        if (pt && pt != o + 0x1B0 && readable(pt, 0x30)) {
+                            const float *pf = (const float *)pt;
+                            sz = (int)(pf[7] * 100); a = (int)(pf[6] * 100);
+                            r = (int)pf[3]; g = (int)pf[4]; b = (int)pf[5];
+                        }
+                        rlog("psys %p: tex %p (%s %ux%u) count %lu flags %08lx flags2 %08lx objcol %02x%02x%02x%02x first size x100 %d rgb %d,%d,%d alpha x100 %d",
+                             (void *)o, st, tx ? "ok" : "NONE", tx ? tx->w : 0, tx ? tx->h : 0,
+                             (unsigned long)RD32(o, 0x230), (unsigned long)RD32(o, OBJ_FLAGS),
+                             (unsigned long)RD32(o, OBJ_FLAGS2), o[0x94], o[0x95], o[0x96], o[0x97],
+                             sz, r, g, b, a);
+                        ndesc++;
+                    }
+                }
+                if ((tc[7] || tc[8] || tc[10]) && now - tlast_log > 1000 && ndesc < 300) {
+                    rlog("undrawn types visible: polygrid %lu linesystem %lu canvas %lu",
+                         (unsigned long)tc[7], (unsigned long)tc[8], (unsigned long)tc[10]);
+                    tlast_log = now; ndesc++;
+                }
+            }
             int jump = quads > prev_quads + 16 || quads + 16 < prev_quads;
             if (plog < 2000 && (nsys != prev_sys || jump || now - plast > 5000)) {
                 rlog("particles: %lu systems visible, %lu particle quads, %lu sprite quads",
@@ -2040,16 +2272,22 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
         ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_test, 0);
     }
     {
-        int cur = -1;
+        int cur = -1, curnd = 0;
         for (i = 0; i < n; i++) {
             if (list[i].blend != cur) {
                 cur = list[i].blend;
-                ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[cur == SPR_ADD ? OPT2D_ADD : cur == SPR_MUL ? OPT2D_MULTIPLY : OPT2D_ALPHA],
+                ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[cur == SPR_ADD ? OPT2D_ADD : cur == SPR_MUL ? OPT2D_MULTIPLY :
+                                                                   cur == SPR_SOLID ? OPT2D_SOLID : OPT2D_ALPHA],
                                                     bf, 0xFFFFFFFFu);
             }
-            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &list[i].tex->srv);
-            ID3D11DeviceContext_Draw(g_ctx, 6, list[i].first);
+            if (list[i].nodepth != curnd) {
+                curnd = list[i].nodepth;
+                ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, curnd ? g_ds_off : g_ds_test, 0);
+            }
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, list[i].tex ? &list[i].tex->srv : &g_white_srv);
+            ID3D11DeviceContext_Draw(g_ctx, list[i].count, list[i].first);
         }
+        if (curnd) ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_test, 0);
     }
 }
 

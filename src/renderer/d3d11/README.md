@@ -16,7 +16,8 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 **3D so far:**
 - Camera from the engine's scene description (position, quaternion, FOV, viewport)
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
-- Particles (smoke, sparks, blood) from the engine's particle lists, as camera-facing quads. Sized with the original formula (measured from the stock renderer), but not yet compared side by side on screen.
+- Particles (smoke, sparks, blood) from the engine's particle lists, as camera-facing quads. Sized with the original formula (measured from the stock renderer); bullet-impact smoke matches the stock renderer on screen.
+- Canvases: effects the game draws itself through the renderer's canvas interface, such as the marines' shoulder-lamp beams.
 - Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
 - World models (doors, lifts, rotating parts) follow their current transform.
 - The sky: the level's sky geometry is drawn from its own sky camera behind everything else.

@@ -275,3 +275,28 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [~] Particles: drawn from the engine's particle lists (counts confirmed in game) and sized with the stock formula; not yet compared with the stock renderer on screen
 - [ ] LODs, translucent models, attachments; sky sprites and models
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
+
+## Canvases (object type 10)
+
+Canvases are drawn by the game, not the renderer. Found in the stock `d3d.ren`
+through its per-type table at `0x1004BA88` (0x14 bytes per type; type 10 adds the
+object to a list that `0x10022AE3` draws later).
+
+- Canvas object: `+0x1B0` draw function, `+0x1B4` user data. The renderer calls
+  `fn(iface, canvas, user)` (cdecl).
+- `iface` is a C++ object; its vtable (stock `0x100463C8`) has five thiscall methods:
+
+| Slot | Method |
+|---|---|
+| 0 | `DrawPrimitive(verts, count, flags)`: a triangle fan of 0x20-byte vertices `{x, y, z, rhw, diffuse ARGB, specular, u, v}`. World space, unless the canvas has object flag 0x40 or `flags & 0x40`, then camera space |
+| 1 | `SetState(state, value)` |
+| 2 | `GetState(state, *value)` |
+| 3 | `SetTexture(handle)`: engine callback 0 (RenderStruct `+0x04`) turns the handle into a SharedTexture |
+| 4 | `GetTextureSize(int *w, int *h)` of the current texture |
+
+- States: 0 alpha blend on/off, 1 z test, 2 z write, 3 source blend, 4 dest blend
+  (1 zero, 2 one, 3 src colour, 4 inv src colour, 5 src alpha, 6 inv src alpha),
+  5 texture address, 6 colour op, 7 alpha op (1 texture, 2 diffuse, 3 modulate, 4 add,
+  5 add signed). Stock defaults: blend off, z test on, z write on, src alpha / inv src alpha.
+- In "Unwelcome Guests" the marines' shoulder-lamp beams are a canvas: two additive
+  (one, one) quads per lamp, faded by the texture.
