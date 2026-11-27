@@ -2008,15 +2008,24 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_vb, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_cvb, 0);
     if (logged < 2) { rlog("sprites: %lu drawn", (unsigned long)n); logged++; }
-    {   /* in-game particle diagnostics (menu frames don't count) */
+    {   /* in-game particle diagnostics (menu frames don't count): log when the
+           number of visible systems changes, or the quad count jumps, or every 5 s */
         static int plog;
-        if (plog < 3 && g_cur_sd && RD32(g_cur_sd, 0) == 1) {
-            uint32_t q, nsys = 0, ncull = 0;
+        static DWORD plast;
+        static uint32_t prev_quads, prev_sys = 0xFFFFFFFFu;
+        if (g_cur_sd && RD32(g_cur_sd, 0) == 1) {
+            uint32_t q, nsys = 0, quads = n - nspr;
+            DWORD now = GetTickCount();
             for (q = 0; q < g_nvis_objs; q++) if (g_vis_objs[q][OBJ_TYPE] == 6) nsys++;
-            (void)ncull;
-            rlog("particles: %lu systems visible, %lu particle quads, %lu sprite quads",
-                 (unsigned long)nsys, (unsigned long)(n - nspr), (unsigned long)nspr);
-            plog++;
+            int jump = quads > prev_quads + 16 || quads + 16 < prev_quads;
+            if (plog < 2000 && (nsys != prev_sys || jump || now - plast > 5000)) {
+                rlog("particles: %lu systems visible, %lu particle quads, %lu sprite quads",
+                     (unsigned long)nsys, (unsigned long)quads, (unsigned long)nspr);
+                plog++;
+                plast = now;
+                prev_sys = nsys;
+                prev_quads = quads;
+            }
         }
     }
     if (!n) return;
