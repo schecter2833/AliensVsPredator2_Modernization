@@ -55,6 +55,7 @@ Console variables:
 | `avp2m_psize` | 100 | Extra particle size multiplier in percent, on top of the original's sizing. Read live. |
 | `avp2m_dlscale` | 100 | Strength of dynamic lights (flares, lamps) on level surfaces in percent; 0 turns them off. Read live. |
 | `avp2m_worldsun` | 1 | 0 turns off the global sky light on vertex-lit level surfaces. Read live. |
+| `avp2m_skinnorm` | 1 | Divides vertex weights by their total when it is not 1 (fixes the PH Zeta Site head spikes); 0 skins like the stock renderer. Read live. |
 | `avp2m_lmdump` | 0 | 1 writes lightmap atlas page 0 to `avp2m_lmpage0.bmp` at level load (diagnostics). |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 

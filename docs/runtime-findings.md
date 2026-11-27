@@ -88,14 +88,22 @@ bytes (a fault on its thread silently ends the process).
 
 Side note: the official launcher starts the real game fullscreen at 640×480, which works on this machine.
 
-## Primal Hunt: stretched heads in the Zeta Site intro (not a renderer bug)
+## Primal Hunt: stretched heads in the Zeta Site intro (fixed in the D3D11 renderer)
 
 In the Zeta Site intro cutscene several characters show long thin spikes from the head, and Dunya's
-hair is pulled up into a spike (the bald-looking head). The **stock renderer shows exactly the same
-thing** at the same moments (compared side by side, same frames), so it comes from the game or engine
-side on this system, not from our renderer. In the single-player menu the same character model looks
-normal. Worth a later look (animation/skinning in the engine or game code on modern Windows), since a
-fix would have to be outside the renderer.
+hair is pulled up into a spike. The stock renderer shows exactly the same thing, so it is not something
+we introduced, but the cause turned out to be in the model data, and the renderer is where it can be fixed.
+
+A vertex-weight dump of the loaded models found that some Primal Hunt models list the same bone weight
+several times. In `dunya.abc`, piece 23 (the head and hair) has 149 vertices whose weights are the head
+node (6) repeated five or six times at 1.0 each, and one vertex has eleven copies. `merc4.abc` and the
+other mercenaries have a few vertices with doubled pairs (node 3 at 0.5 + 0.5 + node 24 at 0.5 + 0.5).
+Skinning is a plain weighted sum of each weight's node-space position, so a vertex with six copies ends up
+six times as far from its bone: the spike. The menu shows the same model at a pose where this is hidden.
+
+The D3D11 renderer now divides by the weight total when it is not 1 (cvar `avp2m_skinnorm`, default 1),
+and accepts up to 32 weights per vertex instead of 8. With that, Dunya and the others look normal in the
+same cutscene frames. The stock renderer keeps the spikes.
 
 Elsewhere at the start of Zeta Site (menus, mission screen, cutscene rooms, the bunker entrance) the
 D3D11 renderer matches the stock one.

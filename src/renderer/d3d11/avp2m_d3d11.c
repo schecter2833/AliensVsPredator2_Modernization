@@ -1032,6 +1032,7 @@ static void cross3(const float *a, const float *b, float *o)
 static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
 static const uint8_t *obj_model(const uint8_t *o);
 static uint32_t g_model_off;      /* model objects: Model pointer at +0x1F8 (AVP2) or +0x1FC (PH) */
+static int g_skin_normalize = 1;  /* cvar avp2m_skinnorm: normalise vertex weights that do not sum to 1 */
 static int lm_decode(const uint8_t *src, uint32_t size, uint32_t *dst, uint32_t count)
 {
     const uint8_t *end = src + size;
@@ -1860,6 +1861,29 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
         if (!readable(RDPTR(o, 0), 0x4C)) continue;
         nodes = ((PFN_NodeXforms)(void *)(uintptr_t)RD32(RDPTR(o, 0), 0x48))(o, NULL);
         if (!readable(nodes, nnodes * 64)) continue;
+        {   /* diagnostics: nodes with unusual scale or large offsets (PH cutscene spikes) */
+            static const uint8_t *seen[48];
+            static int nseen;
+            int q;
+            uint32_t ni, nbad = 0;
+            for (q = 0; q < nseen && seen[q] != o; q++) ;
+            if (q == nseen && nseen < 48) {
+                seen[nseen++] = o;
+                for (ni = 0; ni < nnodes; ni++) {
+                    const float *x = nodes + ni * 16;
+                    float sx = sqrtf(x[0] * x[0] + x[4] * x[4] + x[8] * x[8]);
+                    float sy = sqrtf(x[1] * x[1] + x[5] * x[5] + x[9] * x[9]);
+                    float sz = sqrtf(x[2] * x[2] + x[6] * x[6] + x[10] * x[10]);
+                    float tl = sqrtf(x[3] * x[3] + x[7] * x[7] + x[11] * x[11]);
+                    if (sx < 0.8f || sx > 1.25f || sy < 0.8f || sy > 1.25f || sz < 0.8f || sz > 1.25f || tl > 300.0f || x[3] != x[3]) {
+                        if (nbad++ < 12)
+                            rlog("  odd node %lu/%lu of model %p: scale x100 %d,%d,%d offset %d,%d,%d", (unsigned long)ni, (unsigned long)nnodes,
+                                 (const void *)o, (int)(sx * 100), (int)(sy * 100), (int)(sz * 100), (int)x[3], (int)x[7], (int)x[11]);
+                    }
+                }
+                if (nbad) rlog("  model %p: %lu of %lu nodes odd", (const void *)o, (unsigned long)nbad, (unsigned long)nnodes);
+            }
+        }
         object_matrix(o, campos, cr, cu, cf, om);
         nmodels++;
         {   /* name each model once (diagnostics) */
@@ -1921,6 +1945,42 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                 mlog++;
             }
         }
+        {   /* diagnostics: vertex weights that point past the node list, too many weights, or don't sum to 1 */
+            static const uint8_t *seenw[64];
+            static int nseenw;
+            int q;
+            for (q = 0; q < nseenw && seenw[q] != o; q++) ;
+            if (q == nseenw && nseenw < 64) {
+                uint32_t p2, badnode = 0, toomany = 0, badsum = 0, total = 0, maxnode = 0;
+                seenw[nseenw++] = o;
+                for (p2 = 0; p2 < npieces; p2++) {
+                    const uint8_t *pc2 = RDPTR(pieces, p2 * 4), *vs;
+                    uint32_t nvs, v2;
+                    if (!readable(pc2, 0x44)) continue;
+                    vs = RDPTR(pc2, 0x04); nvs = RD32(pc2, 0x08);
+                    if (!nvs || nvs > 4096 || !readable(vs, nvs * 0x20)) continue;
+                    for (v2 = 0; v2 < nvs; v2++) {
+                        const uint8_t *vv2 = vs + v2 * 0x20, *w2 = RDPTR(vv2, 0);
+                        uint32_t nw2 = *(const uint16_t *)(vv2 + 4), k2;
+                        float sum = 0;
+                        total++;
+                        if (nw2 > 32) { toomany++; continue; }
+                        if (!readable(w2, nw2 * 0x14)) continue;
+                        for (k2 = 0; k2 < nw2; k2++) {
+                            uint32_t nd = *(const uint32_t *)(w2 + k2 * 0x14 + 0x10);
+                            sum += ((const float *)(w2 + k2 * 0x14))[3];
+                            if (nd >= nnodes) badnode++;
+                            if (nd > maxnode) maxnode = nd;
+                        }
+                        if (nw2 && (sum < 0.95f || sum > 1.05f)) badsum++;   /* normalised when skinning */
+                    }
+                }
+                if (badnode || toomany || badsum)
+                    rlog("  weights of model %p: %lu verts, %lu weights past node %lu (max node %lu), %lu with >32 weights, %lu sums off",
+                         (const void *)o, (unsigned long)total, (unsigned long)badnode, (unsigned long)nnodes,
+                         (unsigned long)maxnode, (unsigned long)toomany, (unsigned long)badsum);
+            }
+        }
         /* hidden pieces: one bit per piece index at object +0x24C (AVP2) or
            +0x260 (Primal Hunt), tested by the stock renderer before drawing */
         hidden = readable(o, 0x264) ? RD32(o, g_model_off == 0x1FC ? 0x260 : 0x24C) : 0;
@@ -1962,8 +2022,8 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
             for (vi = 0; vi < nverts; vi++) {
                 const uint8_t *v = verts + vi * 0x20, *w = RDPTR(v, 0);
                 uint32_t nw = *(const uint16_t *)(v + 4), k;
-                float acc[3] = { 0, 0, 0 }, nrm[3] = { 0, 0, 0 }, wp[3], n2[3];
-                if (nw > 8 || !readable(w, nw * 0x14)) nw = 0;
+                float acc[3] = { 0, 0, 0 }, nrm[3] = { 0, 0, 0 }, wp[3], n2[3], wsum = 0;
+                if (nw > 32 || !readable(w, nw * 0x14)) nw = 0;
                 for (k = 0; k < nw; k++) {
                     const float *ww = (const float *)(w + k * 0x14);
                     uint32_t node = *(const uint32_t *)(w + k * 0x14 + 0x10);
@@ -1973,6 +2033,15 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                     rot33(nodes + node * 16, (const float *)(v + 0x14), tn);
                     acc[0] += t[0] * ww[3]; acc[1] += t[1] * ww[3]; acc[2] += t[2] * ww[3];
                     nrm[0] += tn[0] * ww[3]; nrm[1] += tn[1] * ww[3]; nrm[2] += tn[2] * ww[3];
+                    wsum += ww[3];
+                }
+                /* Some Primal Hunt models (dunya.abc, merc*.abc) list the same weight several
+                 * times, e.g. head node x6 at 1.0 each; a plain sum pushes those vertices out
+                 * along their bone (the stretched head spikes the stock renderer also shows).
+                 * Normalising by the weight total puts them back where the artist placed them. */
+                if (g_skin_normalize && wsum > 0.001f && (wsum < 0.99f || wsum > 1.01f)) {
+                    float inv = 1.0f / wsum;
+                    for (k = 0; k < 3; k++) { acc[k] *= inv; nrm[k] *= inv; }
                 }
                 if (!nw) memcpy(acc, v + 8, sizeof acc);
                 xform34(om, acc, wp);
@@ -2866,6 +2935,7 @@ static void render_world(const uint8_t *sd)
             g_particle_scale = (float)cvar_int("avp2m_psize", 100) / 100.0f;
             g_dl_scale = (float)cvar_int("avp2m_dlscale", 100) / 100.0f;
             g_world_sun = cvar_int("avp2m_worldsun", 1);
+            g_skin_normalize = cvar_int("avp2m_skinnorm", 1);
             if (!(g_particle_scale > 0.01f && g_particle_scale < 100.0f)) g_particle_scale = 1.0f;
             g_model_sat = (float)cvar_int("avp2m_modelsat", 200) / 100.0f;
             if (!(g_model_sat > 0.05f && g_model_sat < 8.0f)) g_model_sat = 2.0f;
