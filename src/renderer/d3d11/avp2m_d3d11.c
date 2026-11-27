@@ -19,6 +19,7 @@
 #include <d3dcompiler.h>
 #include <stdint.h>
 #include <stdlib.h>
+#include <stdio.h>
 #include <string.h>
 #include <math.h>
 
@@ -1541,7 +1542,190 @@ static int __cdecl r_get_opt2d_blend(int *mode)        { if (mode) *mode = g_opt
 static int __cdecl r_set_opt2d_color(uint32_t argb)    { g_opt_color = argb | 0xFF000000u; return 1; }
 static int __cdecl r_get_opt2d_color(uint32_t *argb)   { if (argb) *argb = g_opt_color; return 1; }
 
-static int __cdecl r_render_scene(void *scene)         { if (g_ctx) render_world((const uint8_t *)scene); return 1; }
+/* Diagnostics: hex dump of a block of engine memory, 8 dwords per line. */
+static void rlog_dump(const char *tag, const void *p, UINT_PTR n)
+{
+    UINT_PTR o;
+    if (!readable(p, n)) { rlog("%s %p: unreadable", tag, p); return; }
+    for (o = 0; o < n; o += 32) {
+        const uint32_t *d = (const uint32_t *)((const uint8_t *)p + o);
+        rlog("%s +%03lx: %08lx %08lx %08lx %08lx %08lx %08lx %08lx %08lx", tag, (unsigned long)o,
+             (unsigned long)d[0], (unsigned long)d[1], (unsigned long)d[2], (unsigned long)d[3],
+             (unsigned long)d[4], (unsigned long)d[5], (unsigned long)d[6], (unsigned long)d[7]);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Objects: visibility query through the engine's world tree            */
+/* ------------------------------------------------------------------ */
+/* world+0x6C is the engine's world tree (vtable at its +0). vtable[5] (+0x14)
+ * is a thiscall visibility query. It walks a quadtree: nodes that hold BSP
+ * leaves hand their objects over through on_object_list (after the leaf's
+ * own visibility test); other nodes report objects whose box overlaps
+ * pos +/- max_dist through on_object. The engine uses 0x2C-0x47 as scratch. */
+typedef struct VisQuery {
+    uint32_t list_index;                  /* which per-node object list (0 = normal objects) */
+    float pos[3];                         /* viewpoint */
+    float max_dist;
+    void (__cdecl *on_object)(uint8_t *obj, void *user);
+    void (__cdecl *on_object_list)(void *list_head, uint8_t ***out, uint32_t *count);
+    void *user;                           /* passed to on_object */
+    void (__cdecl *on_leaf)(uint8_t *leaf);
+    int (__cdecl *box_visible)(const uint8_t *box);     /* center +0x0C, half size +0x18 */
+    int (__cdecl *node_visible)(const uint8_t *node);   /* center +0x30, radius +0x40 */
+    uint32_t engine_scratch[8];           /* +0x2C: query box min/max, tree pointer */
+} VisQuery;
+typedef void (__fastcall *PFN_WorldTreeQuery)(void *self, void *edx, VisQuery *q);
+
+#define OBJ_FLAGS     0x88    /* bit 0: visible */
+#define OBJ_FLAGS2    0x8C
+#define OBJ_COLOR     0x94
+#define OBJ_TYPE      0xBC    /* byte: 1 model, 2 world model, 3 sprite, 4 light, 6 particles, 7 polygrid, 8 lines, 9 container, 10 canvas */
+#define OBJ_POS       0x194   /* position (3 floats) */
+#define OBJ_ROT       0x168   /* rotation quaternion x, y, z, w (tentative) */
+#define OBJ_SCALE     0x1A0   /* scale (3 floats; world models: half size) */
+
+#define MAX_VIS_OBJECTS 4096
+static uint8_t *g_vis_objs[MAX_VIS_OBJECTS];
+static uint32_t g_nvis_objs, g_nvis_seen;
+
+static int obj_wanted(const uint8_t *obj)
+{
+    return obj && (RD32(obj, OBJ_FLAGS) & 1) && !(RD32(obj, OBJ_FLAGS2) & 0x100) && !(RD32(obj, 0x124) & 0x400);
+}
+static void __cdecl vis_on_object(uint8_t *obj, void *user)
+{
+    (void)user;
+    g_nvis_seen++;
+    if (!obj_wanted(obj) || g_nvis_objs >= MAX_VIS_OBJECTS) return;
+    g_vis_objs[g_nvis_objs++] = obj;
+}
+static uint32_t g_nvis_listed;
+/* Linked list of {next, prev, obj}; the list ends at the head or at an object
+ * whose +0x190 is set. Objects are also appended to the engine's array, as the
+ * stock renderer does. */
+static void __cdecl vis_on_object_list(void *list_head, uint8_t ***out, uint32_t *count)
+{
+    uint8_t *it = (uint8_t *)RDPTR(list_head, 0);
+    while (it && it != (uint8_t *)list_head) {
+        uint8_t *obj = (uint8_t *)RDPTR(it, 8);
+        if (!obj || RD32(obj, 0x190)) break;
+        g_nvis_listed++;
+        if (obj_wanted(obj)) {
+            if (out && count && *out) (*out)[(*count)++] = obj;
+            if (g_nvis_objs < MAX_VIS_OBJECTS) g_vis_objs[g_nvis_objs++] = obj;
+        }
+        it = (uint8_t *)RDPTR(it, 0);
+    }
+}
+static void __cdecl vis_on_leaf(uint8_t *leaf) { (void)leaf; }
+static int __cdecl vis_always(const uint8_t *p) { (void)p; return 1; }
+
+static int cmp_ptr(const void *a, const void *b)
+{
+    uintptr_t x = (uintptr_t)*(uint8_t *const *)a, y = (uintptr_t)*(uint8_t *const *)b;
+    return (x > y) - (x < y);
+}
+
+static void collect_objects(const uint8_t *world, const float *eye)
+{
+    VisQuery q;
+    uint8_t *tree;
+    static int logged, calls;
+    g_nvis_objs = g_nvis_seen = g_nvis_listed = 0;
+    calls++;
+    if (!readable(world, 0x70)) return;
+    tree = (uint8_t *)world + 0x6C;
+    if (!readable(RDPTR(tree, 0), 0x18)) return;
+    memset(&q, 0, sizeof q);
+    q.pos[0] = eye[0]; q.pos[1] = eye[1]; q.pos[2] = eye[2];
+    q.max_dist = 1000000.0f;
+    q.on_object = vis_on_object;
+    q.on_object_list = vis_on_object_list;
+    q.on_leaf = vis_on_leaf;
+    q.box_visible = vis_always;
+    q.node_visible = vis_always;
+    ((PFN_WorldTreeQuery)(void *)(uintptr_t)RD32(RDPTR(tree, 0), 0x14))(tree, NULL, &q);
+    {   /* an object can be reported by more than one node or leaf */
+        uint32_t i, n = 0;
+        qsort(g_vis_objs, g_nvis_objs, sizeof g_vis_objs[0], cmp_ptr);
+        for (i = 0; i < g_nvis_objs; i++)
+            if (!n || g_vis_objs[n - 1] != g_vis_objs[i]) g_vis_objs[n++] = g_vis_objs[i];
+        g_nvis_objs = n;
+    }
+    if ((calls == 1 || calls == 400 || calls == 1500) && logged < 3) {
+        uint32_t i, bytype[16] = { 0 };
+        logged++;
+        rlog("objects (frame %d): engine reported %lu directly, %lu through leaf lists", calls,
+             (unsigned long)g_nvis_seen, (unsigned long)g_nvis_listed);
+        rlog("  world tree %p vtable %p query fn %08lx", (void *)tree, (void *)RDPTR(tree, 0),
+             (unsigned long)RD32(RDPTR(tree, 0), 0x14));
+        for (i = 0; i < g_nvis_objs; i++) bytype[g_vis_objs[i][OBJ_TYPE] & 15]++;
+        rlog("objects: %lu visible (model %lu, worldmodel %lu, sprite %lu, light %lu, particles %lu, polygrid %lu, lines %lu, container %lu, canvas %lu, normal %lu)",
+             (unsigned long)g_nvis_objs, (unsigned long)bytype[1], (unsigned long)bytype[2], (unsigned long)bytype[3],
+             (unsigned long)bytype[4], (unsigned long)bytype[6], (unsigned long)bytype[7], (unsigned long)bytype[8],
+             (unsigned long)bytype[9], (unsigned long)bytype[10], (unsigned long)bytype[0]);
+        for (i = 0; i < g_nvis_objs && i < 40; i++) {
+            const float *pp = (const float *)(g_vis_objs[i] + OBJ_POS);
+            rlog("  obj %p type %d flags %08lx pos %d,%d,%d", (void *)g_vis_objs[i], g_vis_objs[i][OBJ_TYPE],
+                 (unsigned long)RD32(g_vis_objs[i], OBJ_FLAGS), (int)pp[0], (int)pp[1], (int)pp[2]);
+        }
+        if (logged == 2) {
+            for (i = 0; i < g_nvis_objs; i++) {
+                if (g_vis_objs[i][OBJ_TYPE] == 1) { rlog_dump("  model", g_vis_objs[i], 0x300); break; }
+            }
+            for (i = 0; i < g_nvis_objs; i++) {
+                if (g_vis_objs[i][OBJ_TYPE] == 3) { rlog_dump("  sprite", g_vis_objs[i], 0x200); break; }
+            }
+            for (i = 0; i < g_nvis_objs; i++) {
+                if (g_vis_objs[i][OBJ_TYPE] == 4) { rlog_dump("  light", g_vis_objs[i], 0x200); break; }
+            }
+        }
+    }
+}
+
+static void dump_scene(const uint8_t *sd)
+{
+    static int dumped[3];
+    uint32_t mode;
+    if (!readable(sd, 0x100)) return;
+    mode = RD32(sd, 0);
+    if (mode > 2 || dumped[mode] >= 1) return;
+    dumped[mode]++;
+    rlog("SceneDesc dump (mode %lu):", (unsigned long)mode);
+    rlog_dump("  sd", sd, 0x120);
+    {
+        int k;
+        for (k = 1; k <= 6; k++) {
+            char tag[16];
+            sprintf(tag, "  sd[%d]", k);
+            rlog("  sd+%02x -> %p", k * 4, (void *)RDPTR(sd, k * 4));
+            rlog_dump(tag, RDPTR(sd, k * 4), 0x40);
+        }
+        if (RD32(sd, 0x2C)) rlog_dump("  sd2c", RDPTR(sd, 0x2C), 0x80);
+    }
+    {
+        const uint8_t *list = RDPTR(sd, mode == 1 ? 0xB4 : 0xF4);
+        uint32_t cnt = RD32(sd, mode == 1 ? 0xB8 : 0xF8), i;
+        rlog("  object list %p count %lu", (void *)list, (unsigned long)cnt);
+        for (i = 0; i < cnt && i < 12 && readable(list, (i + 1) * 4); i++) {
+            char tag[16];
+            sprintf(tag, "  obj%lu", (unsigned long)i);
+            rlog("  object %lu at %p", (unsigned long)i, (void *)RDPTR(list, i * 4));
+            rlog_dump(tag, RDPTR(list, i * 4), 0x280);
+        }
+    }
+}
+
+static int __cdecl r_render_scene(void *scene)
+{
+    const uint8_t *sd = (const uint8_t *)scene;
+    dump_scene(sd);
+    if (g_ctx && readable(sd, 0x100) && RD32(sd, 0) == 1 && g_cur_ctx && RDPTR(sd, 0x34) == (const uint8_t *)g_cur_ctx)
+        collect_objects((const uint8_t *)g_cur_ctx->world, (const float *)(sd + 0xD8));
+    if (g_ctx) render_world(sd);
+    return 1;
+}
 static void __cdecl r_render_command(int argc, char **argv) { (void)argc; (void)argv; }
 
 static void *__cdecl r_get_hook(const char *name)

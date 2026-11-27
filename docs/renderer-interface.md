@@ -160,6 +160,40 @@ A frame is an array of 0x18-byte entries, indexed by the poly ref's `entry`:
 - **Lightmap UVs:** let N be the poly's plane normal and R the reference vector of its axis frame (index = flags bits 11–13): (0,0,−1), (0,0,1), (0,1,0), (0,−1,0), (0,−1,0), (0,−1,0). Then P = R × N and Q = N × P (not normalized). Texel coordinates are `s = dot(pos − origin, P) / grid + 0.5` and `t = dot(pos − origin, Q) / grid + 0.5`, so texel i's center sits at i + 0.5.
 - **Polys without a lightmap** (most terrain) are gouraud-lit from the per-vertex arrays above. Texture × light, with no 2× overbright, matches the stock renderer in "Unwelcome Guests".
 
+**Objects and visibility.** In world mode (draw mode 1) the SceneDesc object list is empty. The renderer asks the engine's world tree for objects:
+
+- `world+0x6C` is the world tree. Its vtable slot 5 (`+0x14`) is a thiscall query taking one struct (≥ 0x48 bytes; the engine uses `+0x2C`–`+0x47` as scratch, so the struct must reserve them):
+
+| Query | Field |
+|---|---|
+| `+0x00` | object list index (0 = normal objects) |
+| `+0x04` | viewpoint (3 floats) |
+| `+0x10` | radius around the viewpoint |
+| `+0x14` | `void cb(obj, user)`: objects in quadtree nodes without BSP leaves whose box overlaps the query box |
+| `+0x18` | `void cb(list_head, obj ***out, int *count)`: a visible BSP leaf's object list. Items are `{next, prev, obj}`; stop at the head or at an object whose `+0x190` is set. The stock renderer appends to `(*out)[(*count)++]` |
+| `+0x1C` | user pointer passed to `+0x14` |
+| `+0x20` | `void cb(leaf)`: visible leaf (its polys and polygrids) |
+| `+0x24` | `int cb(box)`: box visibility (center `+0x0C`, half size `+0x18`) |
+| `+0x28` | `int cb(node)`: quadtree node visibility (center `+0x30`, radius `+0x40`) |
+
+The same object can be reported by several nodes, so deduplicate. "Unwelcome Guests" at the start: about 120 objects (17 models, 78 world models, 10 sprites, 10 particle systems, lights).
+
+| Object | Field |
+|---|---|
+| `+0x00` | engine class vtable |
+| `+0x58` | engine frame stamp (written by the engine during queries) |
+| `+0x88` | flags (bit 0 = visible) |
+| `+0x8C` | flags 2 (`0x100` = hidden from the renderer) |
+| `+0x94` | color (ARGB) |
+| `+0x9C` | rotation quaternion x, y, z, w (also mirrored at `+0x168`) |
+| `+0xAC` | scale (3 floats) |
+| `+0xBC` | byte type: 0 normal, 1 model, 2 world model, 3 sprite, 4 light, 5 camera, 6 particle system, 7 polygrid, 8 line system, 9 container, 10 canvas |
+| `+0xF4` / `+0x100` | world-space bounding box min / max |
+| `+0x194` | position |
+| `+0x1A0` | dimensions (world models: half size; lights: radius at `+0x1B0`) |
+| `+0x1C0` | models: model data pointer (tentative) |
+| `+0x1A8`… | sprites: sprite tracker (sprite, animation, frame; tentative) |
+
 **SceneDesc** (argument of RenderScene):
 
 | Offset | Field |
@@ -192,5 +226,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Milestone 2, step 2: world textures. 566 textures (32-bit + DXT1/3/5) in 'Unwelcome Guests', 5 polygons untextured
 - [x] Step 3: static lighting. Lightmaps (3,313 polys in "Unwelcome Guests") and gouraud vertex light, both from `LightAnim_BASE`
 - [ ] Animated lights (flicker anims, shadow-mask lights); dynamic lights
+- [x] Object enumeration through the engine's world tree (models, world models, sprites, particles, lights)
 - [ ] Step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
