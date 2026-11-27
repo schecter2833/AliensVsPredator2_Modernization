@@ -222,9 +222,9 @@ The object matrix comes from position `+0x194`, rotation `+0x9C` and scale `+0xA
 **Model lighting** (partly mapped):
 
 - **Light grid** at `world+0xFC`: `+0x00` cells (u32 `0x00RRGGBB`), `+0x08` y stride, `+0x20` z stride (in cells; x stride is 1), `+0x14`/`+0x18`/`+0x1C` max cell index x/y/z, `+0x24` cell size (3 floats; 2000 in "Unwelcome Guests"), `+0x30` 1/cell size, `+0x3C` grid minimum. The stock renderer samples it trilinearly at the model's position. The raw values are very dark (0–20 of 255 at the level start). The stock renderer's per-channel tables at `0x1005A004` / `0x1005A104` / `0x1005A204` turn out to be plain linear ramps, `min(255, i × light scale)`, built from the scene's light scale (1.0 here), so they don't explain the brighter stock result.
-- **Sun:** RenderStruct `+0x138` is a global light direction and `+0x144` its color (3 floats). Both are used for models; "Unwelcome Guests" has no sun (color 0).
-- **Model hook:** the stock renderer calls the game code's hook (SceneDesc `+0xFC`, user data `+0x100`) once per model with `{object, hook flags = 1, object flags, float *light_add, float *object_color}`. Light add starts at SceneDesc `+0x1C` and color at the object's color, both 0–255. In "Unwelcome Guests" it returns light add 0 and color 255 for every model, so it isn't the source of the extra brightness either. It's still called, because the game can use it (vision modes, highlights).
-- **Still unexplained:** where the stock renderer's extra model brightness comes from, especially for the first-person knife (light grid 0,2,4 at the camera, yet bright in the stock renderer). Next place to look: the per-vertex lighting function at `0x10004663`.
+- **Global (sky) light:** RenderStruct `+0x138` is the direction the light travels and `+0x144` its color (3 floats, 0–255). "Unwelcome Guests" uses a moonlight of (50, 74, 99) shining straight down. The stock renderer stores the negated direction (towards the light) for shading.
+- **Model hook:** the stock renderer calls the game code's hook (SceneDesc `+0xFC`, user data `+0x100`) once per model with `{object, hook flags = 1, object flags, float *light_add, float *object_color}`. Light add starts at SceneDesc `+0x1C` and color at the object's color, both 0–255. In "Unwelcome Guests" it returns add 0 and color 255.
+- **Measured formula.** The trace proxy's research probe reads the stock renderer's per-model lighting state (image offset `0x52980`) while the original renderer runs. For the first-person knife it shows color 2.0 (object color / 255, times a 2× model factor), grid ambient (0, 2, 4) and the global light (50, 74, 99) towards (−0.06, 0.99, 0.01). So per vertex: light = add + color × (grid + global light × max(0, N·L) + point lights). The global light is what makes models visibly lit at night; the dark grid alone is correct.
 - **Static lights:** world tree vtable slot 2 (`+0x08`, thiscall) is a box query: `+0x04` list index (1 = static lights), `+0x08` min, `+0x14` max, `+0x2C` `void cb(light, user)`, `+0x30` user. Light: `+0x68` position, `+0x74` radius, `+0x78` color (3 floats, 0–255), `+0x84` direction, `+0x90` cone cosine, `+0x94` outer color.
 - **Dynamic lights:** light objects (type 4): position `+0x194`, radius `+0x1B0`, color bytes `+0x94`–`+0x96`.
 
@@ -266,6 +266,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Sprites (billboards and rotatable), in game and in the menu background
 - [x] Step 4: world models (doors, lifts, rotating parts) drawn with their current transform
 - [x] Step 5a: models (characters, first-person weapon and arms), skinned on the CPU from the engine's node transforms
-- [~] Model lighting: light grid, static and dynamic point lights are wired up; brightness uses a stopgap floor until the stock per-channel tables are mapped
+- [x] Model lighting matching the stock formula (light grid, global sky light, static and dynamic point lights, the game's model hook, 2× model color)
 - [ ] LODs, translucent models, attachments; particles; sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

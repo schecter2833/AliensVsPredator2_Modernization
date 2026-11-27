@@ -17,7 +17,7 @@
 
 #include "../renderer/render_struct.h"
 
-#define TRACE_VERSION      "0.1.2"
+#define TRACE_VERSION      "0.1.3"
 #define LOG_FIRST_CALLS    8      /* full lines for the first N calls per slot */
 #define SUMMARY_EVERY_MS   30000  /* ms between count summaries (menus run uncapped at 2000+ fps) */
 
@@ -119,6 +119,11 @@ static int load_real(void)
     dir_of_self(path, MAX_PATH - 32);
     lstrcatA(path, "d3d.ren");
     g_real = LoadLibraryA(path);
+    if (!g_real) {   /* test folders keep a renamed copy so it stays out of the mode list */
+        dir_of_self(path, MAX_PATH - 32);
+        lstrcatA(path, "stock_d3d.ren");
+        g_real = LoadLibraryA(path);
+    }
     if (!g_real) {
         tlog("ERROR: could not load stock renderer %s (error %lu)", path, GetLastError());
         return 0;
@@ -150,6 +155,37 @@ static int safe_str(const char *p)
 }
 
 /* ------------------------------------------------------------------ */
+/* Research probe: the stock renderer's per-model lighting state        */
+/* ------------------------------------------------------------------ */
+/* The stock d3d.ren keeps its model renderer at image offset 0x52980; after
+ * a frame it still holds the last model it lit. Logging it lets the D3D11
+ * renderer be compared against the original. Offsets are for the AVP2
+ * 1.0.9.6 d3d.ren (SHA-256 in docs/hashes.md). */
+static float f32(const uint8_t *p, int off) { return *(const float *)(p + off); }
+static void probe_model_light(void)
+{
+    static LONG calls;
+    static int logged;
+    const uint8_t *m, *obj;
+    LONG n = InterlockedIncrement(&calls);
+    if (!g_real || logged >= 40 || (n % 30) != 0) return;
+    m = (const uint8_t *)g_real + 0x52980;
+    if (!safe_ptr(m, 0x8B0)) return;
+    obj = *(const uint8_t *const *)(m + 4);
+    if (!safe_ptr(obj, 0x200)) return;
+    logged++;
+    /* the log formatter has no %f: values are printed x100 */
+#define C(o) (int)(f32(m, (o)) * 100.0f)
+    tlog("modellight obj=%p type=%u flags=%08lX pos=%d,%d,%d add=%d,%d,%d color=%d,%d,%d (x100)",
+         (const void *)obj, obj[0xBC], (unsigned long)*(const uint32_t *)(obj + 0x88),
+         C(0x5D0), C(0x5D4), C(0x5D8), C(0x850), C(0x854), C(0x858), C(0x85C), C(0x860), C(0x864));
+    tlog("           sun=%d,%d,%d dir=%d,%d,%d,%d grid=%d,%d,%d lights=%lu (x100)",
+         C(0x868), C(0x86C), C(0x870), C(0x874), C(0x878), C(0x87C), C(0x880),
+         C(0x884), C(0x888), C(0x88C), (unsigned long)*(const uint32_t *)(m + 0x2BC));
+#undef C
+}
+
+/* ------------------------------------------------------------------ */
 /* Per-call trace (called from the thunks with all registers saved)     */
 /* ------------------------------------------------------------------ */
 void __cdecl avp2m_trace_enter(int idx, const uint32_t *args)
@@ -172,6 +208,9 @@ void __cdecl avp2m_trace_enter(int idx, const uint32_t *args)
             tlog("        string: %.200s", (const char *)(uintptr_t)args[0]);
         }
     }
+
+    if (idx == RS_RenderScene)
+        probe_model_light();
 
     if (idx == RS_SwapBuffers) {
         LONG now = (LONG)GetTickCount();

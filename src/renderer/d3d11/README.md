@@ -18,7 +18,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
 - Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
 - World models (doors, lifts, rotating parts) follow their current transform.
-- Models: characters, creatures and the first-person weapon and arms, animated by the engine's skeleton and skinned here. Model lighting samples the level's light grid and nearby static and dynamic lights, with a stopgap brightness floor until the original brightness tables are mapped.
+- Models: characters, creatures and the first-person weapon and arms, animated by the engine's skeleton and skinned here. Model lighting follows the original formula, measured from the stock renderer: light grid ambient, the level's global (sky) light, nearby static and dynamic lights, and the game's model hook.
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
@@ -44,6 +44,7 @@ Console variables:
 | `avp2m_lmscale` | 100 | Light brightness in percent (lightmaps and vertex light). Read live. |
 | `avp2m_hdr` | 0 | HDR scene rendering: 1 = ACES filmic tone mapping, 2 = Reinhard. The 3D scene renders into a 16-bit float target and is tone mapped before the HUD is drawn, so the HUD is unaffected. Read live. |
 | `avp2m_exposure` | 100 | HDR exposure in percent. Read live. |
+| `avp2m_modelsat` | 200 | Model color multiplier in percent (the original uses 2×). Read live. |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
 It writes `avp2m_d3d11.log` next to the DLL.

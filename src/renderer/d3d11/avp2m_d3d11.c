@@ -165,8 +165,9 @@ typedef struct RenderContext {
 } RenderContext;
 static RenderContext *g_cur_ctx;
 static float g_lmscale = 1.0f;       /* cvar avp2m_lmscale x100 */
-static float g_model_floor = 0.40f;     /* stopgap ambient floor for models */
-static float g_model_gridscale = 4.0f;  /* stopgap boost for the dark light grid */
+static float g_sun_dir[3], g_sun_col[3];   /* RenderStruct +0x138 / +0x144, read per frame */
+static int g_sun_on;
+static float g_model_sat = 2.0f;        /* model color multiplier (stock: 2x); cvar avp2m_modelsat x100 */
 static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vertex colour only */
 static ID3D11VertexShader *g_vs3d;
 static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
@@ -1650,6 +1651,16 @@ static void run_model_hook(uint8_t *o, float *add, float *col)
 static void draw_models(const float *campos, const float *cr, const float *cu, const float *cf)
 {
     const uint8_t *world = g_cur_ctx ? (const uint8_t *)g_cur_ctx->world : NULL;
+    if (g_rs && readable((const uint8_t *)g_rs + 0x138, 0x18)) {
+        const float *d = (const float *)((const uint8_t *)g_rs + 0x138), *c = d + 3;
+        int q;
+        /* RenderStruct holds the direction the light travels; shading needs the
+         * direction towards the light (the stock renderer stores it negated). */
+        for (q = 0; q < 3; q++) { g_sun_dir[q] = -d[q]; g_sun_col[q] = c[q] / 255.0f; }
+        g_sun_on = (c[0] > 0 || c[1] > 0 || c[2] > 0);
+    } else {
+        g_sun_on = 0;
+    }
     static MdlDraw list[1024];
     static float skinned[4096 * 3];
     static uint32_t light[4096];
@@ -1698,9 +1709,9 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                     rlog_dump("  lightgrid", g, 0x48);
                 }
             }
-            /* The raw grid is very dark (0..20 of 255 in "Unwelcome Guests"); the stock renderer
-             * brightens it through per-channel tables not mapped yet. Until then, keep a floor so
-             * models stay readable and let the grid and point lights add on top. */
+            /* Stock formula (measured from the original renderer with the trace probe):
+             * light = add + color x (grid + global light x max(0, N.dir) + point lights),
+             * with color = object color / 255 x 2. */
             {
                 float hadd[3], hcol[3];
                 run_model_hook(o, hadd, hcol);
@@ -1710,13 +1721,17 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                 for (k = 0; k < 3; k++) {
                     float c = hcol[k] / 255.0f;
                     mcol[k] = c < 0 ? 0 : c;
-                    mamb[k] = (g_model_floor + amb[k] / 255.0f * g_model_gridscale + hadd[k] / 255.0f) * mcol[k];
+                    mcol[k] *= g_model_sat;
+                    mamb[k] = hadd[k] / 255.0f + amb[k] / 255.0f * mcol[k];
                 }
             }
             gather_model_lights(world, lp, readable(m, 0xAC) && *(const float *)(m + 0xA8) > 0 ?
                                 *(const float *)(m + 0xA8) : 64.0f);
             if (mlog < 12 && (lp[0] != 0 || lp[1] != 0 || lp[2] != 0)) {
-                rlog("    %d lights%s", g_nmlights, (RD32(o, OBJ_FLAGS) & 0x40) ? " (camera-space model)" : "");
+                rlog("    %d lights%s, global light %d,%d,%d dir %d,%d,%d (x100)", g_nmlights,
+                     (RD32(o, OBJ_FLAGS) & 0x40) ? " (camera-space model)" : "",
+                     (int)(g_sun_col[0] * 25500), (int)(g_sun_col[1] * 25500), (int)(g_sun_col[2] * 25500),
+                     (int)(g_sun_dir[0] * 100), (int)(g_sun_dir[1] * 100), (int)(g_sun_dir[2] * 100));
                 mlog++;
             }
         }
@@ -1755,7 +1770,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                 rot33(om, nrm, n2);
                 {   /* light grid ambient (gentle top-down term) plus point lights */
                     float len = sqrtf(n2[0] * n2[0] + n2[1] * n2[1] + n2[2] * n2[2]) + 1e-6f;
-                    float sh = 0.8f + 0.3f * (n2[1] / len), pl[3] = { 0, 0, 0 };
+                    float pl[3] = { 0, 0, 0 };
                     uint32_t ch[3];
                     int li;
                     for (li = 0; li < g_nmlights; li++) {
@@ -1769,8 +1784,12 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                         pl[1] += L->col[1] * ndl * att;
                         pl[2] += L->col[2] * ndl * att;
                     }
+                    if (g_sun_on) {   /* global (sky) light */
+                        float sd = (n2[0] * g_sun_dir[0] + n2[1] * g_sun_dir[1] + n2[2] * g_sun_dir[2]) / len;
+                        if (sd > 0) for (k = 0; k < 3; k++) pl[k] += g_sun_col[k] * sd;
+                    }
                     for (k = 0; k < 3; k++) {
-                        float l = (mamb[k] * sh + pl[k] * mcol[k]) * g_lmscale;
+                        float l = (mamb[k] + pl[k] * mcol[k]) * g_lmscale;
                         ch[k] = (uint32_t)((l < 0 ? 0 : l > 1 ? 1 : l) * 255.0f);
                     }
                     light[vi] = ch[0] | (ch[1] << 8) | (ch[2] << 16);
@@ -2053,6 +2072,8 @@ static void render_world(const uint8_t *sd)
             g_lmscale = (sc > 0.05f && sc < 8.0f) ? sc : 1.0f;
             g_lmdebug = cvar_int("avp2m_lmdebug", 0);
             g_hdr = cvar_int("avp2m_hdr", 0);
+            g_model_sat = (float)cvar_int("avp2m_modelsat", 200) / 100.0f;
+            if (!(g_model_sat > 0.05f && g_model_sat < 8.0f)) g_model_sat = 2.0f;
             g_exposure = (float)cvar_int("avp2m_exposure", 100) / 100.0f;
             if (!(g_exposure > 0.05f && g_exposure < 16.0f)) g_exposure = 1.0f;
             last = now;
