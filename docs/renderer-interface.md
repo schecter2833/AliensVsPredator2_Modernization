@@ -192,6 +192,8 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 | `+0x194` | position |
 | `+0x1A0` | dimensions (world models: half size; lights: radius at `+0x1B0`) |
 | `+0x1C0` | models: model data pointer (tentative) |
+| `+0x1B0` | world models: their WorldBsp (matches an entry in the world's BSP list) |
+| `+0x1F8` | world models: current transform, 4×4 floats, row-major, translation in the last column. Identity until the object moves |
 | `+0x1B4` / `+0x1B8` | sprites: sprite pointer / current frame entry (first dword = the frame's SharedTexture) |
 
 **Sprites** (type 3): size is texture pixels × scale (`+0xAC` x, `+0xB0` y); color bytes `+0x94`–`+0x97` are r, g, b, a. Flags `+0x88`: `0x08` rotatable (quad oriented by the object's rotation instead of facing the camera), `0x20` scales with distance (glows), `0x40` "really close" (position is in camera space), `0x200` not lit by the world. Flags 2 `+0x8C`: `0x04` additive (ONE, ONE), `0x08` multiply (ZERO, SRCCOLOR), otherwise alpha blend.
@@ -232,5 +234,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [ ] Animated lights (flicker anims, shadow-mask lights); dynamic lights
 - [x] Object enumeration through the engine's world tree (models, world models, sprites, particles, lights)
 - [x] Sprites (billboards and rotatable), in game and in the menu background
-- [ ] Step 4: world models (doors) transforms; step 5: models, particles, sky
+- [x] Step 4: world models (doors, lifts, rotating parts) drawn with their current transform
+- [ ] Step 5: models, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

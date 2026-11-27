@@ -117,7 +117,7 @@ typedef struct RTexture {
 } RTexture;
 static RTexture *g_textures;
 
-typedef struct DrawBatch { RTexture *tex; int lmpage; UINT first, count; } DrawBatch;
+typedef struct DrawBatch { RTexture *tex; int lmpage; int bsp; UINT first, count; } DrawBatch;
 
 /* Lightmap atlas pages (built per world at load). */
 #define LM_PAGE 2048
@@ -134,6 +134,9 @@ typedef struct RenderContext {
     LMPage *lmpages;
     int nlmpages;
     ID3D11Buffer *cvb;               /* vertex colours (stream 1); alpha 1 = lightmapped */
+    const uint8_t **bsps;            /* WorldBsp pointer per BSP index */
+    uint32_t nbsps;
+    const float **bsp_xf;            /* per frame: world-model transform (engine 4x4) or NULL */
     uint32_t *vcol;                  /* CPU copy, for light animation updates later */
     int built;
 } RenderContext;
@@ -143,6 +146,7 @@ static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vert
 static ID3D11VertexShader *g_vs3d;
 static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
 static ID3D11DepthStencilState *g_ds_test;      /* depth test, no depth write */
+static ID3D11Buffer *g_cbw;                     /* b1: object-to-world rows (3 x float4) */
 #define MAX_SPRITES 2048
 static ID3D11Buffer *g_spr_vb, *g_spr_cvb;
 static ID3D11InputLayout  *g_layout3d;
@@ -186,7 +190,10 @@ static const char k_hlsl3d[] =
     "SamplerState s : register(s0); SamplerState sl : register(s1);\n"
     "struct VI { float3 p : POSITION; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
     "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
-    "VO vs(VI i) { VO o; o.p = mul(float4(i.p, 1), vp); o.uv = i.uv; o.luv = i.luv; o.c = i.c; return o; }\n"
+    "cbuffer W : register(b1) { float4 w0, w1, w2; };\n"
+    "VO vs(VI i) { VO o; float4 p = float4(i.p, 1);\n"
+    "  float3 wp = float3(dot(w0, p), dot(w1, p), dot(w2, p));\n"
+    "  o.p = mul(float4(wp, 1), vp); o.uv = i.uv; o.luv = i.luv; o.c = i.c; return o; }\n"
     "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5);\n"
     "  float3 lmc = lm.Sample(sl, i.luv).rgb * lmscale.x * i.c.a;\n"
     "  float3 l = i.c.a > 0.5 ? lmc : i.c.rgb;\n"
@@ -321,6 +328,8 @@ static int create_objects(void)
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
+    bd.ByteWidth = 48;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbw))) return 0;
     memset(&bd, 0, sizeof bd);
     bd.ByteWidth = sizeof(WVertex) * 6 * MAX_SPRITES;
     bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -533,6 +542,7 @@ static void release_device(void)
     SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
     SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
     SAFE_RELEASE(g_ps_spr, ID3D11PixelShader);
+    SAFE_RELEASE(g_cbw, ID3D11Buffer);
     SAFE_RELEASE(g_spr_vb, ID3D11Buffer);
     SAFE_RELEASE(g_spr_cvb, ID3D11Buffer);
     SAFE_RELEASE(g_ds_test, ID3D11DepthStencilState);
@@ -1131,12 +1141,13 @@ static void lm_release(RenderContext *rc)
     rc->nlmpages = 0;
 }
 
-typedef struct BuildTri { RTexture *tex; int lmpage; WVertex v[3]; uint32_t col[3]; } BuildTri;
+typedef struct BuildTri { int bsp; RTexture *tex; int lmpage; WVertex v[3]; uint32_t col[3]; } BuildTri;
 
 static int cmp_tri(const void *a, const void *b)
 {
     const BuildTri *p = (const BuildTri *)a, *q = (const BuildTri *)b;
     uintptr_t x = (uintptr_t)p->tex, y = (uintptr_t)q->tex;
+    if (p->bsp != q->bsp) return p->bsp - q->bsp;
     if (x != y) return x < y ? -1 : 1;
     return (p->lmpage > q->lmpage) - (p->lmpage < q->lmpage);
 }
@@ -1184,12 +1195,16 @@ static void build_world(RenderContext *rc)
     }
     if (nbsp > 4096 || !readable(list, nbsp * 4)) { rlog("world: bad bsp list %p n=%lu", (void *)list, (unsigned long)nbsp); return; }
 
+    rc->bsps = (const uint8_t **)calloc(nbsp ? nbsp : 1, sizeof *rc->bsps);
+    rc->bsp_xf = (const float **)calloc(nbsp ? nbsp : 1, sizeof *rc->bsp_xf);
+    rc->nbsps = (rc->bsps && rc->bsp_xf) ? nbsp : 0;
     for (b = 0; b < nbsp; b++) {
         const uint8_t *entry = RDPTR(list, b * 4), *bsp, *polies;
         uint32_t np, pi;
         if (!readable(entry, 8)) continue;
         bsp = RDPTR(entry, 4);
         if (!readable(bsp, 0xA8)) continue;
+        if (rc->nbsps) rc->bsps[b] = bsp;
         polies = RDPTR(bsp, 0xA0);
         np = RD32(bsp, 0xA4);
         if (np > 2000000 || !readable(polies, np * 4)) { skipped++; continue; }
@@ -1255,6 +1270,7 @@ static void build_world(RenderContext *rc)
                 vv[1] = vlist + k * 0x18;
                 vv[2] = vlist + (k + 1) * 0x18;
                 tris[n].tex = tex;
+                tris[n].bsp = (int)b;
                 tris[n].lmpage = lmpage;
                 tris[n].col[0] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[0] : 0x00808080u;
                 tris[n].col[1] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[k] : 0x00808080u;
@@ -1294,7 +1310,9 @@ static void build_world(RenderContext *rc)
                 memcpy(&verts[i * 3], tris[i].v, sizeof tris[i].v);
                 if (rc->vcol) memcpy(&rc->vcol[i * 3], tris[i].col, sizeof tris[i].col);
                 if (!rc->nbatches || rc->batches[rc->nbatches - 1].tex != tris[i].tex ||
-                    rc->batches[rc->nbatches - 1].lmpage != tris[i].lmpage) {
+                    rc->batches[rc->nbatches - 1].lmpage != tris[i].lmpage ||
+                    rc->batches[rc->nbatches - 1].bsp != tris[i].bsp) {
+                    rc->batches[rc->nbatches].bsp = tris[i].bsp;
                     rc->batches[rc->nbatches].tex = tris[i].tex;
                     rc->batches[rc->nbatches].lmpage = tris[i].lmpage;
                     rc->batches[rc->nbatches].first = (UINT)(i * 3);
@@ -1491,6 +1509,59 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
     }
 }
 
+/* Object-to-world transform for the 3D shader: rows of the engine's 4x4
+ * (row-major, translation in the last column). NULL = identity. */
+static void set_world_rows(const float *m)
+{
+    static const float ident[12] = { 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0 };
+    D3D11_MAPPED_SUBRESOURCE map;
+    if (!g_cbw) return;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cbw, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, m ? m : ident, 48);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cbw, 0);
+    }
+}
+
+/* World models (type 2): +0x1B0 is their WorldBsp; +0x1F8 their current
+ * transform (identity until a door or lift moves). */
+#define WM_BSP 0x1B0
+#define WM_XF  0x1F8
+static void update_world_models(RenderContext *rc)
+{
+    uint32_t i, b;
+    static int logged;
+    uint32_t matched = 0, moved = 0;
+    if (!rc->nbsps) return;
+    memset(rc->bsp_xf, 0, rc->nbsps * sizeof *rc->bsp_xf);
+    for (i = 0; i < g_nvis_objs; i++) {
+        const uint8_t *o = g_vis_objs[i], *bsp;
+        const float *m;
+        if (o[OBJ_TYPE] != 2 || !readable(o, WM_XF + 64)) continue;
+        bsp = RDPTR(o, WM_BSP);
+        for (b = 0; b < rc->nbsps; b++) if (rc->bsps[b] == bsp) break;
+        if (b == rc->nbsps) continue;
+        matched++;
+        m = (const float *)(o + WM_XF);
+        if (m[0] != 1 || m[5] != 1 || m[10] != 1 || m[1] != 0 || m[2] != 0 || m[4] != 0 ||
+            m[6] != 0 || m[8] != 0 || m[9] != 0 || m[3] != 0 || m[7] != 0 || m[11] != 0) {
+            rc->bsp_xf[b] = m;
+            moved++;
+            if (logged < 1) {
+                int k;
+                for (k = 0; k < 4; k++)
+                    rlog("  wm %p bsp %lu m[%d] = %d %d %d %d (x1000)", (const void *)o, (unsigned long)b, k,
+                         (int)(m[k * 4] * 1000), (int)(m[k * 4 + 1] * 1000), (int)(m[k * 4 + 2] * 1000), (int)(m[k * 4 + 3] * 1000));
+                rlog("  wm pos %d,%d,%d", (int)((const float *)(o + OBJ_POS))[0], (int)((const float *)(o + OBJ_POS))[1],
+                     (int)((const float *)(o + OBJ_POS))[2]);
+            }
+        }
+    }
+    if (logged < 3 && (moved || logged == 0)) {
+        logged++;
+        rlog("world models: %lu matched to BSPs, %lu transformed", (unsigned long)matched, (unsigned long)moved);
+    }
+}
+
 static void render_world(const uint8_t *sd)
 {
     RenderContext *rc;
@@ -1588,7 +1659,12 @@ static void render_world(const uint8_t *sd)
         ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 2, vbs, strides, offs);
     }
     ID3D11DeviceContext_VSSetShader(g_ctx, g_vs3d, NULL, 0);
-    ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
+    {
+        ID3D11Buffer *cbs[2] = { g_cb3d, g_cbw };
+        ID3D11DeviceContext_VSSetConstantBuffers(g_ctx, 0, 2, cbs);
+    }
+    set_world_rows(NULL);
+    if (rc) update_world_models(rc);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
     ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
     {
@@ -1597,9 +1673,13 @@ static void render_world(const uint8_t *sd)
     }
     if (rc) {
         UINT bi;
+        const float *cur_xf = NULL;
         for (bi = 0; bi < rc->nbatches; bi++) {
             ID3D11ShaderResourceView *srv[2];
             int lp = rc->batches[bi].lmpage;
+            int bb = rc->batches[bi].bsp;
+            const float *xf = (bb >= 0 && (uint32_t)bb < rc->nbsps) ? rc->bsp_xf[bb] : NULL;
+            if (xf != cur_xf) { set_world_rows(xf); cur_xf = xf; }
             srv[0] = rc->batches[bi].tex ? rc->batches[bi].tex->srv : g_white_srv;
             srv[1] = (lp >= 0 && lp < rc->nlmpages && rc->lmpages[lp].srv) ? rc->lmpages[lp].srv : g_white_srv;
             ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
@@ -1607,6 +1687,7 @@ static void render_world(const uint8_t *sd)
         }
     }
 
+    set_world_rows(NULL);
     draw_sprites(pos, r, u, f);
 
     /* back to the 2D pipeline */
@@ -2126,6 +2207,8 @@ static void __cdecl r_delete_context(void *ctx)
     lm_release(rc);
     if (rc->cvb) ID3D11Buffer_Release(rc->cvb);
     free(rc->vcol);
+    free(rc->bsps);
+    free(rc->bsp_xf);
     free(rc->batches);
     free(rc);
 }
