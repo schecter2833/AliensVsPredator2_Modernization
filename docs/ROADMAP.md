@@ -31,7 +31,8 @@ Client-side only, so no effect on multiplayer.
 - [x] **Milestone 1:** Direct3D 11 renderer drawing all 2D (menus, HUD, fonts, fades), with vsync and correct window placement (`src/renderer/d3d11`)
 - [ ] **Milestone 2:** 3D world in D3D11 (`RenderScene`: world geometry, lightmaps, models, sprites, particles, effects)
 - [ ] Video playback (the engine asks for DirectDraw hooks)
-- [ ] Native widescreen and Hor+ FOV. Note: the game's menu only offers 4:3 modes (filter in `CShell.DLL`), so widescreen needs camera FOV help from the hook layer
+- [x] Native widescreen and Hor+ FOV, done in the renderer (`avp2m_widescreen`): the game still picks a 4:3 mode, the game target is made as wide as the window, full-screen 3D scenes fill it with a wider horizontal FOV, and menus/HUD stay 4:3 in the middle
+- [ ] HUD elements anchored to the screen edges in widescreen (needs to know which 2D draws are HUD)
 - [ ] Arbitrary resolutions, high refresh rates
 - [ ] Correct HUD/menu scaling at 16:9 and 21:9
 - [x] Borderless fullscreen with aspect-correct scaling; window centered correctly on wide displays
@@ -69,7 +70,7 @@ New components get written in Rust where it fits; the existing C renderer gets p
 
 ## Phase 2: Engine hook layer
 An injected DLL that patches `lithtech.exe` at runtime. The files on disk are never touched.
-- [ ] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game)
+- [x] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game). Done in the renderer: `avp2m_maxfps` (high-resolution waitable timer; holds 60 exactly with vsync off)
 - [ ] Frame-time / physics fix for high FPS (movement, jumping and wall-walking break above ~60 FPS)
 - [ ] Raw mouse input in place of DirectInput 7; fix mouse acceleration
 - [ ] Controller support (XInput / SDL)

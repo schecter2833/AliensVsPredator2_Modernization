@@ -79,6 +79,11 @@ static RenderStruct *g_rs;
 static HWND  g_hwnd;
 static int   g_windowed;
 static uint32_t g_w = 640, g_h = 480;          /* game render resolution */
+/* Widescreen (cvar avp2m_widescreen, default 1): the game only offers 4:3 modes, so the game target is
+ * made as wide as the window's aspect (g_tw x g_h). Full-screen 3D scenes fill all of it with a wider
+ * horizontal FOV (Hor+); everything 2D stays 4:3 in the middle, g_xoff pixels from the left. */
+static uint32_t g_tw = 640, g_xoff = 0;
+static int g_widescreen = 1;
 
 static ID3D11Device        *g_dev;
 static ID3D11DeviceContext *g_ctx;
@@ -478,8 +483,15 @@ static int create_objects(void)
 static int create_game_target(void)
 {
     D3D11_TEXTURE2D_DESC td;
+    g_tw = g_w;
+    if (g_widescreen && g_bb_w && g_bb_h && (uint64_t)g_bb_w * g_h > (uint64_t)g_bb_h * g_w + g_bb_h) {
+        g_tw = (uint32_t)((double)g_h * g_bb_w / g_bb_h + 0.5) & ~1u;
+        if (g_tw > 8192) g_tw = 8192;
+        if (g_tw < g_w) g_tw = g_w;
+    }
+    g_xoff = (g_tw - g_w) / 2;
     memset(&td, 0, sizeof td);
-    td.Width = g_w;
+    td.Width = g_tw;
     td.Height = g_h;
     td.MipLevels = td.ArraySize = 1;
     td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
@@ -487,6 +499,7 @@ static int create_game_target(void)
     td.Usage = D3D11_USAGE_DEFAULT;
     td.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_rt_tex))) return 0;
+    if (g_tw != g_w) rlog("widescreen: game target %lux%lu, 4:3 area at x %lu", (unsigned long)g_tw, (unsigned long)g_h, (unsigned long)g_xoff);
     ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_rtv);
     ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_srv);
     td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
@@ -706,9 +719,9 @@ static void set_transform(float w, float h)
     }
 }
 
-static void bind_pipeline(ID3D11RenderTargetView *rtv, float w, float h, ID3D11SamplerState *samp)
+static void bind_pipeline_at(ID3D11RenderTargetView *rtv, float x, float w, float h, ID3D11SamplerState *samp)
 {
-    D3D11_VIEWPORT vp = { 0, 0, w, h, 0, 1 };
+    D3D11_VIEWPORT vp = { x, 0, w, h, 0, 1 };
     UINT stride = sizeof(Vertex), offset = 0;
     ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &rtv, NULL);
     ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_off, 0);
@@ -722,6 +735,11 @@ static void bind_pipeline(ID3D11RenderTargetView *rtv, float w, float h, ID3D11S
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps, NULL, 0);
     ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &samp);
     set_transform(w, h);
+}
+
+static void bind_pipeline(ID3D11RenderTargetView *rtv, float w, float h, ID3D11SamplerState *samp)
+{
+    bind_pipeline_at(rtv, 0, w, h, samp);
 }
 
 static void flush_batch(void)
@@ -768,7 +786,7 @@ static void push_quad(ID3D11ShaderResourceView *srv, int blend,
 /* Begin 2D drawing into the game-resolution target. */
 static void begin_game_pass(void)
 {
-    bind_pipeline(g_rt_rtv, (float)g_w, (float)g_h, g_samp_point);
+    bind_pipeline_at(g_rt_rtv, (float)g_xoff, (float)g_w, (float)g_h, g_samp_point);
 }
 
 /* ------------------------------------------------------------------ */
@@ -2953,6 +2971,17 @@ static void render_world(const uint8_t *sd)
     vp.MinDepth = 0;
     vp.MaxDepth = 1;
     if (vp.Width <= 0 || vp.Height <= 0) { vp.TopLeftX = vp.TopLeftY = 0; vp.Width = (float)g_w; vp.Height = (float)g_h; }
+    if (g_tw != g_w) {
+        if (vp.TopLeftX <= 0 && vp.TopLeftY <= 0 && vp.Width >= (float)g_w && vp.Height >= (float)g_h) {
+            /* full-screen scene: fill the whole wide target, Hor+ (same vertical FOV, wider horizontal) */
+            xfov = 2.0f * (float)atan(tan(xfov * 0.5) * (double)g_tw / (double)g_w);
+            vp.TopLeftX = 0;
+            vp.Width = (float)g_tw;
+            write_camera(pos, rot, xfov, yfov, nearz, farz, hdr_on, r, u, f);
+        } else {
+            vp.TopLeftX += (float)g_xoff;   /* sub-rect scenes stay inside the 4:3 area */
+        }
+    }
 
     if (hdr_on) {
         float black[4] = { 0, 0, 0, 1 };
@@ -3077,6 +3106,7 @@ static int __cdecl r_init(RenderInit *init)
     g_h = init->mode.height ? init->mode.height : 480;
     g_windowed = cvar_int("windowed", 0) == 1;
     g_vsync = cvar_int("avp2m_vsync", 1) != 0;
+    g_widescreen = cvar_int("avp2m_widescreen", 1) != 0;
     g_lmscale = (float)cvar_int("avp2m_lmscale", 100) / 100.0f;
     if (!(g_lmscale > 0.05f && g_lmscale < 8.0f)) g_lmscale = 1.0f;
     g_lmdebug = cvar_int("avp2m_lmdebug", 0);
@@ -3542,6 +3572,53 @@ static void enforce_fullscreen_window(void)
     }
 }
 
+
+/* Frame limiter (cvar avp2m_maxfps, 0 = off; read live). The stock engine runs uncapped and vsync
+ * only caps at the refresh rate, which on 144-240 Hz monitors is still fast enough to upset the game's
+ * movement code. Sleeps on a high-resolution waitable timer, then spins the last half millisecond. */
+static void limit_frame_rate(void)
+{
+    static LARGE_INTEGER freq, next;
+    static HANDLE timer;
+    static int maxfps;
+    static DWORD lastread;
+    LARGE_INTEGER now;
+    DWORD tick = GetTickCount();
+    static DWORD fps_t0;
+    static unsigned fps_n;
+    fps_n++;
+    if (tick - fps_t0 >= 10000) {   /* average frame rate, every 10 s */
+        if (fps_t0) rlog("fps: %u (avp2m_maxfps %d, vsync %d)", fps_n * 1000u / (tick - fps_t0), maxfps, g_vsync);
+        fps_t0 = tick; fps_n = 0;
+    }
+    if (tick - lastread > 500) {
+        maxfps = cvar_int("avp2m_maxfps", 0);
+        if (maxfps < 0 || maxfps > 1000) maxfps = 0;
+        lastread = tick;
+    }
+    if (!maxfps) { next.QuadPart = 0; return; }
+    if (!freq.QuadPart) QueryPerformanceFrequency(&freq);
+    if (!timer) {
+        timer = CreateWaitableTimerExW(NULL, NULL, 0x00000002 /* CREATE_WAITABLE_TIMER_HIGH_RESOLUTION */, TIMER_ALL_ACCESS);
+        if (!timer) timer = CreateWaitableTimerW(NULL, TRUE, NULL);
+    }
+    QueryPerformanceCounter(&now);
+    if (next.QuadPart && now.QuadPart < next.QuadPart) {
+        LONGLONG left = next.QuadPart - now.QuadPart;
+        LONGLONG ticks100ns = left * 10000000 / freq.QuadPart - 5000;   /* wake 0.5 ms early */
+        if (timer && ticks100ns > 0) {
+            LARGE_INTEGER due;
+            due.QuadPart = -ticks100ns;
+            if (SetWaitableTimer(timer, &due, 0, NULL, NULL, FALSE)) WaitForSingleObject(timer, 100);
+        }
+        do { QueryPerformanceCounter(&now); } while (now.QuadPart < next.QuadPart);
+        next.QuadPart += freq.QuadPart / maxfps;
+        if (now.QuadPart - next.QuadPart > freq.QuadPart / 10) next.QuadPart = now.QuadPart;   /* fell far behind: resync */
+    } else {
+        next.QuadPart = now.QuadPart + freq.QuadPart / maxfps;
+    }
+}
+
 static void present_frame(void)
 {
     uint32_t cw, ch;
@@ -3560,10 +3637,10 @@ static void present_frame(void)
     }
 
     /* Scale the game image to the window, preserving aspect ratio. */
-    sx = (float)g_bb_w / (float)g_w;
+    sx = (float)g_bb_w / (float)g_tw;
     sy = (float)g_bb_h / (float)g_h;
     s = sx < sy ? sx : sy;
-    dw = g_w * s;
+    dw = g_tw * s;
     dh = g_h * s;
     x0 = ((float)g_bb_w - dw) * 0.5f;
     y0 = ((float)g_bb_h - dh) * 0.5f;
@@ -3575,6 +3652,7 @@ static void present_frame(void)
     flush_batch();
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &none);
 
+    limit_frame_rate();
     IDXGISwapChain_Present(g_swap, g_vsync ? 1 : 0, 0);
     g_batch_srv = NULL;
     begin_game_pass();
@@ -3797,8 +3875,12 @@ static int __cdecl r_lock_screen(int l, int t, int r, int b, void **pixels, long
     flush_batch();
     g_scr_box.left = (UINT)l; g_scr_box.top = (UINT)t; g_scr_box.right = (UINT)r; g_scr_box.bottom = (UINT)b;
     g_scr_box.front = 0; g_scr_box.back = 1;
-    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_scr_staging, 0, (UINT)l, (UINT)t, 0,
-                                              (ID3D11Resource *)g_rt_tex, 0, &g_scr_box);
+    {   /* the game's 4:3 area sits g_xoff pixels into the (possibly wider) game target */
+        D3D11_BOX src = g_scr_box;
+        src.left += g_xoff; src.right += g_xoff;
+        ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_scr_staging, 0, (UINT)l, (UINT)t, 0,
+                                                  (ID3D11Resource *)g_rt_tex, 0, &src);
+    }
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_scr_staging, 0, D3D11_MAP_READ, 0, &map))) return 0;
     for (y = (UINT)t; y < (UINT)b; y++)
         memcpy(g_scr_buf + ((size_t)y * g_w + (UINT)l) * 4, (const uint8_t *)map.pData + (size_t)y * map.RowPitch + (size_t)l * 4,
@@ -3814,8 +3896,12 @@ static void __cdecl r_unlock_screen(void)
 {
     if (!g_scr_locked) return;
     g_scr_locked = 0;
-    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_rt_tex, 0, &g_scr_box,
+    {
+        D3D11_BOX dst = g_scr_box;
+        dst.left += g_xoff; dst.right += g_xoff;
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_rt_tex, 0, &dst,
                                           g_scr_buf + ((size_t)g_scr_box.top * g_w + g_scr_box.left) * 4, g_w * 4, 0);
+    }
 }
 static int  __cdecl r_warp_to_screen(void *req)              { (void)req; return 0; }
 static void __cdecl r_make_screenshot(const char *file)      { rlog("MakeScreenShot(%s): not implemented yet", file ? file : "?"); }

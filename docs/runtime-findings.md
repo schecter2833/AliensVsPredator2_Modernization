@@ -107,3 +107,19 @@ same cutscene frames. The stock renderer keeps the spikes.
 
 Elsewhere at the start of Zeta Site (menus, mission screen, cutscene rooms, the bunker entrance) the
 D3D11 renderer matches the stock one.
+
+## Widescreen (Hor+) and the frame limiter
+
+The game's video menu only lists 4:3 modes, so in borderless fullscreen on a wide monitor the picture
+used to be pillarboxed. The D3D11 renderer now makes its game target as wide as the window
+(`avp2m_widescreen`, default on). For example, 640×480 on a 2560×1080 monitor becomes a 1138×480 target.
+- **3D:** scenes that cover the whole game screen are drawn across the full width. The game's horizontal FOV is widened so the vertical FOV is unchanged (Hor+), sky pass included.
+- **2D:** everything 2D (menus, HUD, subtitles, LockScreen, partial clears) and scenes in a sub-rectangle (menu portraits) keep the game's 4:3 coordinates, shifted into the middle.
+- **Results:** tested in the Primal Hunt Zeta Site intro and first area. Characters and the level look correctly proportioned, and objects at the far edges (the dropship, crates) are drawn, so the engine doesn't cull to a 4:3 view.
+- **Known limits:**
+  - The HUD stays in the middle 4:3 area.
+  - Full-screen 2D overlays (fades, tints) cover only that area.
+  - In borderless fullscreen, mouse clicks from the remote test tool didn't reach the menus (keyboard works). This needs a check with a real mouse.
+
+The frame limiter (`avp2m_maxfps`) waits on a high-resolution waitable timer before Present and spins the last
+half millisecond. With `avp2m_vsync 0` and `avp2m_maxfps 60`, the logged average was 60 fps in every 10-second window.

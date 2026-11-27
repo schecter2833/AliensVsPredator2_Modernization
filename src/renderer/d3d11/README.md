@@ -56,6 +56,8 @@ Console variables:
 | `avp2m_dlscale` | 100 | Strength of dynamic lights (flares, lamps) on level surfaces in percent; 0 turns them off. Read live. |
 | `avp2m_worldsun` | 1 | 0 turns off the global sky light on vertex-lit level surfaces. Read live. |
 | `avp2m_skinnorm` | 1 | Divides vertex weights by their total when it is not 1 (fixes the PH Zeta Site head spikes); 0 skins like the stock renderer. Read live. |
+| `avp2m_widescreen` | 1 | Hor+ widescreen: on a window wider than 4:3, full-screen 3D scenes fill the whole width with a wider horizontal FOV (same vertical FOV). Menus, HUD and sub-rect scenes stay 4:3 in the middle. 0 gives the old pillarbox. Read at startup. |
+| `avp2m_maxfps` | 0 | Frame rate cap (0 = off). Works with or without vsync. Read live. The log prints the average frame rate every 10 s. |
 | `avp2m_lmdump` | 0 | 1 writes lightmap atlas page 0 to `avp2m_lmpage0.bmp` at level load (diagnostics). |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
