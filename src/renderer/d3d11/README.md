@@ -23,7 +23,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
-- Animated and dynamic lights (flickering lights, muzzle flashes, flares), particles, proper model lighting
+- Animated and dynamic lights on level surfaces (flickering lights, muzzle flashes, flares), particles, sky sprites and models, translucent and attached models, model LODs
 - No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots
