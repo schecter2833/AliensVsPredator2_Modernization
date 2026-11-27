@@ -230,6 +230,8 @@ The object matrix comes from position `+0x194`, rotation `+0x9C` and scale `+0xA
 
 **Menus** (draw mode 2) draw only the SceneDesc object list (`+0xF4` / `+0xF8`): the main menu's starfield and planets are sprites, plus one model.
 
+**Sky** (draw mode 1). SceneDesc `+0x84`/`+0x90` hold the sky box min/max, `+0x9C`/`+0xA8` the sky view min/max (the range the sky camera moves in; a single point in "Unwelcome Guests"), and `+0xB4`/`+0xB8` the sky object list (world models built far outside the level; 11 here). The sky is drawn first from the sky camera with the main camera's rotation, then depth is cleared and the level is drawn. Sky-flagged polygons (surface flag `0x10`) are left out, so the sky shows through them.
+
 **SceneDesc** (argument of RenderScene):
 
 | Offset | Field |
@@ -267,5 +269,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Step 4: world models (doors, lifts, rotating parts) drawn with their current transform
 - [x] Step 5a: models (characters, first-person weapon and arms), skinned on the CPU from the engine's node transforms
 - [x] Model lighting matching the stock formula (light grid, global sky light, static and dynamic point lights, the game's model hook, 2× model color)
-- [ ] LODs, translucent models, attachments; particles; sky
+- [x] Sky (sky world models from a separate sky camera)
+- [ ] LODs, translucent models, attachments; particles; sky sprites and models
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)

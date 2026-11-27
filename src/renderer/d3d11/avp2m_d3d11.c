@@ -160,6 +160,7 @@ typedef struct RenderContext {
     const uint8_t **bsps;            /* WorldBsp pointer per BSP index */
     uint32_t nbsps;
     const float **bsp_xf;            /* per frame: world-model transform (engine 4x4) or NULL */
+    uint8_t *sky;                    /* per frame: 1 = BSP belongs to the sky */
     uint32_t *vcol;                  /* CPU copy, for light animation updates later */
     int built;
 } RenderContext;
@@ -1256,7 +1257,8 @@ static void build_world(RenderContext *rc)
 
     rc->bsps = (const uint8_t **)calloc(nbsp ? nbsp : 1, sizeof *rc->bsps);
     rc->bsp_xf = (const float **)calloc(nbsp ? nbsp : 1, sizeof *rc->bsp_xf);
-    rc->nbsps = (rc->bsps && rc->bsp_xf) ? nbsp : 0;
+    rc->sky = (uint8_t *)calloc(nbsp ? nbsp : 1, 1);
+    rc->nbsps = (rc->bsps && rc->bsp_xf && rc->sky) ? nbsp : 0;
     for (b = 0; b < nbsp; b++) {
         const uint8_t *entry = RDPTR(list, b * 4), *bsp, *polies;
         uint32_t np, pi;
@@ -2021,15 +2023,81 @@ static void update_world_models(RenderContext *rc)
     }
 }
 
+/* View * projection for a camera, written to the 3D constant buffer. */
+static void write_camera(const float *pos, const float *rot, float xfov, float yfov, float nearz, float farz,
+                         int hdr_on, float *r, float *u, float *f)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    float m[16], sx, sy, a, bq;
+    quat_basis(rot, r, u, f);
+    sx = 1.0f / (float)tan(xfov * 0.5);
+    sy = 1.0f / (float)tan(yfov * 0.5);
+    a = farz / (farz - nearz);
+    bq = -nearz * farz / (farz - nearz);
+    /* row-vector convention: clip = [x y z 1] * M, M = View * Proj */
+    m[0] = r[0] * sx; m[1] = u[0] * sy; m[2]  = f[0] * a; m[3]  = f[0];
+    m[4] = r[1] * sx; m[5] = u[1] * sy; m[6]  = f[1] * a; m[7]  = f[1];
+    m[8] = r[2] * sx; m[9] = u[2] * sy; m[10] = f[2] * a; m[11] = f[2];
+    {
+        float tx = -(pos[0] * r[0] + pos[1] * r[1] + pos[2] * r[2]);
+        float ty = -(pos[0] * u[0] + pos[1] * u[1] + pos[2] * u[2]);
+        float tz = -(pos[0] * f[0] + pos[1] * f[1] + pos[2] * f[2]);
+        m[12] = tx * sx; m[13] = ty * sy; m[14] = tz * a + bq; m[15] = tz;
+    }
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb3d, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        /* HLSL mul(v, M) with default column-major packing needs the transpose */
+        float *o = (float *)map.pData;
+        int i, j;
+        for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) o[i * 4 + j] = m[j * 4 + i];
+        o[16] = g_lmscale; o[17] = (float)g_lmdebug; o[18] = hdr_on ? 1.0f : 0.0f; o[19] = 0;
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb3d, 0);
+    }
+}
+
+/* Sky (draw mode 1): SceneDesc +0x84/+0x90 sky box min/max, +0x9C/+0xA8 sky
+ * view min/max (the sky camera position range), +0xB4/+0xB8 sky objects.
+ * The sky objects (world models placed far outside the level) are drawn
+ * first from the sky camera with the main camera's rotation; the level's
+ * sky-flagged polygons are left out, so the sky shows through them. */
+#define SD_SKY_MIN      0x84
+#define SD_SKY_VIEWMIN  0x9C
+#define SD_SKY_VIEWMAX  0xA8
+#define SD_SKY_OBJS     0xB4
+#define SD_SKY_COUNT    0xB8
+
+static int mark_sky_bsps(RenderContext *rc, const uint8_t *sd, const float *campos, float *skypos)
+{
+    const uint8_t *list = RDPTR(sd, SD_SKY_OBJS);
+    uint32_t n = RD32(sd, SD_SKY_COUNT), i, b, found = 0;
+    const float *vmin = (const float *)(sd + SD_SKY_VIEWMIN), *vmax = (const float *)(sd + SD_SKY_VIEWMAX);
+    int k;
+    if (!rc->sky) return 0;
+    memset(rc->sky, 0, rc->nbsps);
+    if (!n || n > 4096 || !readable(list, n * 4)) return 0;
+    for (i = 0; i < n; i++) {
+        const uint8_t *o = RDPTR(list, i * 4), *bsp;
+        if (!readable(o, 0x200) || o[OBJ_TYPE] != 2) continue;
+        bsp = RDPTR(o, WM_BSP);
+        for (b = 0; b < rc->nbsps; b++)
+            if (rc->bsps[b] == bsp) { rc->sky[b] = 1; found++; break; }
+    }
+    /* sky camera: the view range is usually a single point; otherwise move
+     * within it in proportion to the camera's place in the level */
+    for (k = 0; k < 3; k++) {
+        (void)campos;
+        skypos[k] = 0.5f * (vmin[k] + vmax[k]);
+    }
+    return (int)found;
+}
+
 static void render_world(const uint8_t *sd)
 {
     RenderContext *rc;
     const float *pos, *rot;
-    float xfov, yfov, farz, nearz = 1.0f, sx, sy, a, bq;
-    float r[3], u[3], f[3], m[16];
+    float xfov, yfov, farz, nearz = 1.0f;
+    float r[3], u[3], f[3];
     const int32_t *rect;
     D3D11_VIEWPORT vp;
-    D3D11_MAPPED_SUBRESOURCE map;
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
     int hdr_on = g_hdr && g_hdr_rtv && g_hdr_srv && g_ps_tonemap && g_vs_fs && g_cb_tm;
@@ -2079,29 +2147,7 @@ static void render_world(const uint8_t *sd)
             last = now;
         }
     }
-    quat_basis(rot, r, u, f);
-    sx = 1.0f / (float)tan(xfov * 0.5);
-    sy = 1.0f / (float)tan(yfov * 0.5);
-    a = farz / (farz - nearz);
-    bq = -nearz * farz / (farz - nearz);
-    /* row-vector convention: clip = [x y z 1] * M, M = View * Proj */
-    m[0] = r[0] * sx; m[1] = u[0] * sy; m[2]  = f[0] * a; m[3]  = f[0];
-    m[4] = r[1] * sx; m[5] = u[1] * sy; m[6]  = f[1] * a; m[7]  = f[1];
-    m[8] = r[2] * sx; m[9] = u[2] * sy; m[10] = f[2] * a; m[11] = f[2];
-    {
-        float tx = -(pos[0] * r[0] + pos[1] * r[1] + pos[2] * r[2]);
-        float ty = -(pos[0] * u[0] + pos[1] * u[1] + pos[2] * u[2]);
-        float tz = -(pos[0] * f[0] + pos[1] * f[1] + pos[2] * f[2]);
-        m[12] = tx * sx; m[13] = ty * sy; m[14] = tz * a + bq; m[15] = tz;
-    }
-    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb3d, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
-        /* HLSL mul(v, M) with default column-major packing needs the transpose */
-        float *o = (float *)map.pData;
-        int i, j;
-        for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) o[i * 4 + j] = m[j * 4 + i];
-        o[16] = g_lmscale; o[17] = (float)g_lmdebug; o[18] = hdr_on ? 1.0f : 0.0f; o[19] = 0;
-        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb3d, 0);
-    }
+    write_camera(pos, rot, xfov, yfov, nearz, farz, hdr_on, r, u, f);
 
     vp.TopLeftX = (float)rect[0];
     vp.TopLeftY = (float)rect[1];
@@ -2145,17 +2191,36 @@ static void render_world(const uint8_t *sd)
     if (rc) {
         UINT bi;
         const float *cur_xf = NULL;
+        float skypos[3], sr[3], su[3], sf[3];
+        int pass, nsky = mark_sky_bsps(rc, sd, pos, skypos);
+        static int sky_logged;
+        if (sky_logged < 2) {
+            rlog("sky: %d sky BSPs, sky camera %d,%d,%d", nsky, (int)skypos[0], (int)skypos[1], (int)skypos[2]);
+            sky_logged++;
+        }
+      for (pass = nsky ? 0 : 1; pass < 2; pass++) {
+        if (pass == 0) {
+            write_camera(skypos, rot, xfov, yfov, 1.0f, 200000.0f, hdr_on, sr, su, sf);
+        } else if (nsky) {
+            ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
+            write_camera(pos, rot, xfov, yfov, nearz, farz, hdr_on, r, u, f);
+        }
         for (bi = 0; bi < rc->nbatches; bi++) {
             ID3D11ShaderResourceView *srv[2];
             int lp = rc->batches[bi].lmpage;
             int bb = rc->batches[bi].bsp;
             const float *xf = (bb >= 0 && (uint32_t)bb < rc->nbsps) ? rc->bsp_xf[bb] : NULL;
+            int is_sky = (bb >= 0 && (uint32_t)bb < rc->nbsps) && rc->sky[bb];
+            if (is_sky != (pass == 0)) continue;
             if (xf != cur_xf) { set_world_rows(xf); cur_xf = xf; }
             srv[0] = rc->batches[bi].tex ? rc->batches[bi].tex->srv : g_white_srv;
             srv[1] = (lp >= 0 && lp < rc->nlmpages && rc->lmpages[lp].srv) ? rc->lmpages[lp].srv : g_white_srv;
             ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
             ID3D11DeviceContext_Draw(g_ctx, rc->batches[bi].count, rc->batches[bi].first);
         }
+        cur_xf = NULL;
+        set_world_rows(NULL);
+      }
     }
 
     set_world_rows(NULL);
@@ -2767,6 +2832,7 @@ static void __cdecl r_delete_context(void *ctx)
     free(rc->vcol);
     free(rc->bsps);
     free(rc->bsp_xf);
+    free(rc->sky);
     free(rc->batches);
     free(rc);
 }
