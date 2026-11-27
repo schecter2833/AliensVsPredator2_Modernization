@@ -141,7 +141,10 @@ static RenderContext *g_cur_ctx;
 static float g_lmscale = 1.0f;       /* cvar avp2m_lmscale x100 */
 static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vertex colour only */
 static ID3D11VertexShader *g_vs3d;
-static ID3D11PixelShader  *g_ps3d;
+static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
+static ID3D11DepthStencilState *g_ds_test;      /* depth test, no depth write */
+#define MAX_SPRITES 2048
+static ID3D11Buffer *g_spr_vb, *g_spr_cvb;
 static ID3D11InputLayout  *g_layout3d;
 static ID3D11Buffer       *g_cb3d;
 static ID3D11Texture2D    *g_depth_tex;
@@ -191,7 +194,8 @@ static const char k_hlsl3d[] =
     "  if (lmscale.y > 2.5) return float4(lmc, 1);\n"
     "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
     "  if (lmscale.y > 0.5) return float4(saturate(l), 1);\n"
-    "  return float4(saturate(c.rgb * l), 1); }\n";
+    "  return float4(saturate(c.rgb * l), 1); }\n"
+    "float4 ps_spr(VO i) : SV_Target { return t.Sample(s, i.uv) * i.c; }\n";
 
 static const char k_hlsl[] =
     "cbuffer C : register(b0) { float4 xf; };\n"
@@ -249,6 +253,16 @@ static int create_shaders(void)
         if (FAILED(hr)) { rlog("3D shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?"); return 0; }
         hr = ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), NULL, &g_vs3d);
         if (SUCCEEDED(hr)) hr = ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(psb), ID3D10Blob_GetBufferSize(psb), NULL, &g_ps3d);
+        if (SUCCEEDED(hr)) {
+            ID3DBlob *sb = NULL;
+            hr = compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "ps_spr", "ps_4_0", 0, 0, &sb, &err);
+            if (SUCCEEDED(hr)) {
+                hr = ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(sb), ID3D10Blob_GetBufferSize(sb), NULL, &g_ps_spr);
+                ID3D10Blob_Release(sb);
+            } else {
+                rlog("sprite shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?");
+            }
+        }
         if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 4, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
         ID3D10Blob_Release(vsb);
         ID3D10Blob_Release(psb);
@@ -307,6 +321,14 @@ static int create_objects(void)
     bd.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
     bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
+    memset(&bd, 0, sizeof bd);
+    bd.ByteWidth = sizeof(WVertex) * 6 * MAX_SPRITES;
+    bd.Usage = D3D11_USAGE_DYNAMIC;
+    bd.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    bd.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_spr_vb))) return 0;
+    bd.ByteWidth = 4 * 6 * MAX_SPRITES;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_spr_cvb))) return 0;
     {
         D3D11_DEPTH_STENCIL_DESC dd;
         memset(&dd, 0, sizeof dd);
@@ -314,8 +336,9 @@ static int create_objects(void)
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ALL;
         dd.DepthFunc = D3D11_COMPARISON_LESS_EQUAL;
         ID3D11Device_CreateDepthStencilState(g_dev, &dd, &g_ds_on);
-        dd.DepthEnable = FALSE;
         dd.DepthWriteMask = D3D11_DEPTH_WRITE_MASK_ZERO;
+        ID3D11Device_CreateDepthStencilState(g_dev, &dd, &g_ds_test);
+        dd.DepthEnable = FALSE;
         ID3D11Device_CreateDepthStencilState(g_dev, &dd, &g_ds_off);
     }
 
@@ -509,6 +532,10 @@ static void release_device(void)
     SAFE_RELEASE(g_cb3d, ID3D11Buffer);
     SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
     SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
+    SAFE_RELEASE(g_ps_spr, ID3D11PixelShader);
+    SAFE_RELEASE(g_spr_vb, ID3D11Buffer);
+    SAFE_RELEASE(g_spr_cvb, ID3D11Buffer);
+    SAFE_RELEASE(g_ds_test, ID3D11DepthStencilState);
     SAFE_RELEASE(g_vs3d, ID3D11VertexShader);
     SAFE_RELEASE(g_rt_srv, ID3D11ShaderResourceView);
     SAFE_RELEASE(g_rt_rtv, ID3D11RenderTargetView);
@@ -1329,6 +1356,141 @@ static void quat_basis(const float *q, float *right, float *up, float *fwd)
     fwd[0]   = 2 * (x * z + w * y);     fwd[1]   = 2 * (y * z - w * x);     fwd[2]   = 1 - 2 * (x * x + y * y);
 }
 
+#define OBJ_FLAGS     0x88    /* bit 0: visible */
+#define OBJ_FLAGS2    0x8C
+#define OBJ_COLOR     0x94
+#define OBJ_TYPE      0xBC    /* byte: 1 model, 2 world model, 3 sprite, 4 light, 6 particles, 7 polygrid, 8 lines, 9 container, 10 canvas */
+#define OBJ_POS       0x194   /* position (3 floats) */
+#define OBJ_ROT       0x168   /* rotation quaternion x, y, z, w (tentative) */
+#define OBJ_SCALE     0x1A0   /* scale (3 floats; world models: half size) */
+
+#define MAX_VIS_OBJECTS 4096
+static uint8_t *g_vis_objs[MAX_VIS_OBJECTS];
+static uint32_t g_nvis_objs, g_nvis_seen;
+
+/* ------------------------------------------------------------------ */
+/* Sprites                                                              */
+/* ------------------------------------------------------------------ */
+/* Sprite objects (type 3): +0x1B4 sprite, +0x1B8 pointer to the current
+ * frame entry whose first dword is the frame's SharedTexture. Color bytes at
+ * +0x94..+0x97 (r, g, b, a). Flags (+0x88): 0x08 rotatable (oriented by the
+ * object's rotation), 0x40 "really close" (position in camera space).
+ * Flags 2 (+0x8C): 0x04 additive, 0x08 multiply, otherwise alpha blend. */
+#define SPR_ADD   0
+#define SPR_MUL   1
+#define SPR_ALPHA 2
+typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first; } SprDraw;
+static float g_spr_scale = 0.5f;        /* half size per texel per unit scale (tunable) */
+
+static int cmp_spr(const void *a, const void *b)
+{
+    const SprDraw *p = (const SprDraw *)a, *q = (const SprDraw *)b;
+    if (p->blend != q->blend) return p->blend - q->blend;   /* additive first, then far-to-near alpha */
+    return (p->depth < q->depth) - (p->depth > q->depth);
+}
+
+static void draw_sprites(const float *campos, const float *cr, const float *cu, const float *cf)
+{
+    static SprDraw list[MAX_SPRITES];
+    D3D11_MAPPED_SUBRESOURCE mv, mc;
+    WVertex *vv;
+    uint32_t *cc, i, n = 0;
+    float bf[4] = { 0, 0, 0, 0 };
+    static int logged;
+
+    if (!g_ps_spr || !g_spr_vb) return;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_spr_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mv))) return;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_spr_cvb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mc))) {
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_vb, 0);
+        return;
+    }
+    vv = (WVertex *)mv.pData;
+    cc = (uint32_t *)mc.pData;
+    for (i = 0; i < g_nvis_objs && n < MAX_SPRITES; i++) {
+        const uint8_t *o = g_vis_objs[i], *frame;
+        RTexture *tex;
+        const float *pos, *sc;
+        float p[3], r[3], u[3], hx, hy, d;
+        uint32_t fl = RD32(o, OBJ_FLAGS), fl2 = RD32(o, OBJ_FLAGS2), col;
+        int k;
+        if (o[OBJ_TYPE] != 3 || !readable(o, 0x1C0)) continue;
+        frame = RDPTR(o, 0x1B8);
+        if (!RD32(o, 0x1B4) || !readable(frame, 4) || !RD32(frame, 0)) continue;
+        tex = get_texture((void *)(uintptr_t)RD32(frame, 0));
+        if (!tex) continue;
+        pos = (const float *)(o + OBJ_POS);
+        sc = (const float *)(o + 0xAC);
+        if (fl & 0x40) {          /* camera space */
+            for (k = 0; k < 3; k++) p[k] = campos[k] + pos[0] * cr[k] + pos[1] * cu[k] + pos[2] * cf[k];
+        } else {
+            for (k = 0; k < 3; k++) p[k] = pos[k];
+        }
+        if (fl & 0x08) {          /* rotatable: oriented by the object's rotation */
+            float rf[3];
+            quat_basis((const float *)(o + 0x9C), r, u, rf);
+            if (fl & 0x40) {
+                float rr[3], uu[3];
+                for (k = 0; k < 3; k++) {
+                    rr[k] = r[0] * cr[k] + r[1] * cu[k] + r[2] * cf[k];
+                    uu[k] = u[0] * cr[k] + u[1] * cu[k] + u[2] * cf[k];
+                }
+                memcpy(r, rr, sizeof r); memcpy(u, uu, sizeof u);
+            }
+        } else {
+            memcpy(r, cr, sizeof r); memcpy(u, cu, sizeof u);
+        }
+        hx = (float)tex->w * sc[0] * g_spr_scale;
+        hy = (float)tex->h * sc[1] * g_spr_scale;
+        d = (p[0] - campos[0]) * cf[0] + (p[1] - campos[1]) * cf[1] + (p[2] - campos[2]) * cf[2];
+        if (d < 1.0f && !(fl & 0x08)) continue;
+        col = (uint32_t)o[0x94] | ((uint32_t)o[0x95] << 8) | ((uint32_t)o[0x96] << 16) | ((uint32_t)o[0x97] << 24);
+        {
+            static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
+            WVertex *w = vv + n * 6;
+            for (k = 0; k < 6; k++) {
+                int a;
+                for (a = 0; a < 3; a++) (&w[k].x)[a] = p[a] + r[a] * hx * cx[k] + u[a] * hy * cy[k];
+                w[k].u = cx[k] > 0 ? 1.0f : 0.0f;
+                w[k].v = cy[k] > 0 ? 0.0f : 1.0f;
+                w[k].lu = w[k].lv = 0;
+                w[k].rgba = 0;
+                cc[n * 6 + k] = col;
+            }
+        }
+        list[n].tex = tex;
+        list[n].blend = (fl2 & 4) ? SPR_ADD : (fl2 & 8) ? SPR_MUL : SPR_ALPHA;
+        list[n].depth = d;
+        list[n].first = n * 6;
+        n++;
+    }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_vb, 0);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_cvb, 0);
+    if (logged < 2) { rlog("sprites: %lu drawn", (unsigned long)n); logged++; }
+    if (!n) return;
+    qsort(list, n, sizeof list[0], cmp_spr);
+    {
+        ID3D11Buffer *vbs[2] = { g_spr_vb, g_spr_cvb };
+        UINT strides[2] = { sizeof(WVertex), 4 }, offs[2] = { 0, 0 };
+        ID3D11SamplerState *ss[2] = { g_samp_linear, g_samp_linear };
+        ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 2, vbs, strides, offs);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps_spr, NULL, 0);
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 2, ss);
+        ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_test, 0);
+    }
+    {
+        int cur = -1;
+        for (i = 0; i < n; i++) {
+            if (list[i].blend != cur) {
+                cur = list[i].blend;
+                ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[cur == SPR_ADD ? OPT2D_ADD : cur == SPR_MUL ? OPT2D_MULTIPLY : OPT2D_ALPHA],
+                                                    bf, 0xFFFFFFFFu);
+            }
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &list[i].tex->srv);
+            ID3D11DeviceContext_Draw(g_ctx, 6, list[i].first);
+        }
+    }
+}
+
 static void render_world(const uint8_t *sd)
 {
     RenderContext *rc;
@@ -1341,11 +1503,17 @@ static void render_world(const uint8_t *sd)
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
 
-    if (!readable(sd, 0xF4) || RD32(sd, SD_DRAWMODE) != 1) return;
-    rc = (RenderContext *)RDPTR(sd, SD_CONTEXT);
-    if (!rc || rc != g_cur_ctx) return;
-    if (!rc->built) build_world(rc);
-    if (!rc->vb) return;
+    if (!readable(sd, 0x100)) return;
+    if (RD32(sd, SD_DRAWMODE) == 1) {
+        rc = (RenderContext *)RDPTR(sd, SD_CONTEXT);
+        if (!rc || rc != g_cur_ctx) return;
+        if (!rc->built) build_world(rc);
+        if (!rc->vb) return;
+    } else if (RD32(sd, SD_DRAWMODE) == 2) {
+        rc = NULL;                     /* object list only (menus) */
+    } else {
+        return;
+    }
 
     pos = (const float *)(sd + SD_POS);
     rot = (const float *)(sd + SD_ROT);
@@ -1414,7 +1582,7 @@ static void render_world(const uint8_t *sd)
     ID3D11DeviceContext_RSSetState(g_ctx, g_rast);
     ID3D11DeviceContext_IASetInputLayout(g_ctx, g_layout3d);
     ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
-    {
+    if (rc) {
         ID3D11Buffer *vbs[2] = { rc->vb, rc->cvb };
         UINT strides[2] = { sizeof(WVertex), 4 }, offs[2] = { 0, 0 };
         ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 2, vbs, strides, offs);
@@ -1427,7 +1595,7 @@ static void render_world(const uint8_t *sd)
         ID3D11SamplerState *ss[2] = { g_samp_wrap, g_samp_linear };
         ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 2, ss);
     }
-    {
+    if (rc) {
         UINT bi;
         for (bi = 0; bi < rc->nbatches; bi++) {
             ID3D11ShaderResourceView *srv[2];
@@ -1438,6 +1606,8 @@ static void render_world(const uint8_t *sd)
             ID3D11DeviceContext_Draw(g_ctx, rc->batches[bi].count, rc->batches[bi].first);
         }
     }
+
+    draw_sprites(pos, r, u, f);
 
     /* back to the 2D pipeline */
     {
@@ -1577,17 +1747,6 @@ typedef struct VisQuery {
 } VisQuery;
 typedef void (__fastcall *PFN_WorldTreeQuery)(void *self, void *edx, VisQuery *q);
 
-#define OBJ_FLAGS     0x88    /* bit 0: visible */
-#define OBJ_FLAGS2    0x8C
-#define OBJ_COLOR     0x94
-#define OBJ_TYPE      0xBC    /* byte: 1 model, 2 world model, 3 sprite, 4 light, 6 particles, 7 polygrid, 8 lines, 9 container, 10 canvas */
-#define OBJ_POS       0x194   /* position (3 floats) */
-#define OBJ_ROT       0x168   /* rotation quaternion x, y, z, w (tentative) */
-#define OBJ_SCALE     0x1A0   /* scale (3 floats; world models: half size) */
-
-#define MAX_VIS_OBJECTS 4096
-static uint8_t *g_vis_objs[MAX_VIS_OBJECTS];
-static uint32_t g_nvis_objs, g_nvis_seen;
 
 static int obj_wanted(const uint8_t *obj)
 {
@@ -1721,8 +1880,18 @@ static int __cdecl r_render_scene(void *scene)
 {
     const uint8_t *sd = (const uint8_t *)scene;
     dump_scene(sd);
-    if (g_ctx && readable(sd, 0x100) && RD32(sd, 0) == 1 && g_cur_ctx && RDPTR(sd, 0x34) == (const uint8_t *)g_cur_ctx)
+    g_nvis_objs = 0;
+    if (g_ctx && readable(sd, 0x100) && RD32(sd, 0) == 1 && g_cur_ctx && RDPTR(sd, 0x34) == (const uint8_t *)g_cur_ctx) {
         collect_objects((const uint8_t *)g_cur_ctx->world, (const float *)(sd + 0xD8));
+    } else if (readable(sd, 0x100) && RD32(sd, 0) == 2) {
+        const uint8_t *list = RDPTR(sd, 0xF4);
+        uint32_t cnt = RD32(sd, 0xF8), i;
+        if (cnt <= MAX_VIS_OBJECTS && readable(list, cnt * 4))
+            for (i = 0; i < cnt; i++) {
+                uint8_t *o = (uint8_t *)RDPTR(list, i * 4);
+                if (readable(o, 0x1C0) && obj_wanted(o)) g_vis_objs[g_nvis_objs++] = o;
+            }
+    }
     if (g_ctx) render_world(sd);
     return 1;
 }

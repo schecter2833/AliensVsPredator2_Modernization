@@ -16,6 +16,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 **3D so far:**
 - Camera from the engine's scene description (position, quaternion, FOV, viewport)
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
+- Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**

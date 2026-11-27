@@ -192,7 +192,11 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 | `+0x194` | position |
 | `+0x1A0` | dimensions (world models: half size; lights: radius at `+0x1B0`) |
 | `+0x1C0` | models: model data pointer (tentative) |
-| `+0x1A8`… | sprites: sprite tracker (sprite, animation, frame; tentative) |
+| `+0x1B4` / `+0x1B8` | sprites: sprite pointer / current frame entry (first dword = the frame's SharedTexture) |
+
+**Sprites** (type 3): size is texture pixels × scale (`+0xAC` x, `+0xB0` y); color bytes `+0x94`–`+0x97` are r, g, b, a. Flags `+0x88`: `0x08` rotatable (quad oriented by the object's rotation instead of facing the camera), `0x20` scales with distance (glows), `0x40` "really close" (position is in camera space), `0x200` not lit by the world. Flags 2 `+0x8C`: `0x04` additive (ONE, ONE), `0x08` multiply (ZERO, SRCCOLOR), otherwise alpha blend.
+
+**Menus** (draw mode 2) draw only the SceneDesc object list (`+0xF4` / `+0xF8`): the main menu's starfield and planets are sprites, plus one model.
 
 **SceneDesc** (argument of RenderScene):
 
@@ -227,5 +231,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Step 3: static lighting. Lightmaps (3,313 polys in "Unwelcome Guests") and gouraud vertex light, both from `LightAnim_BASE`
 - [ ] Animated lights (flicker anims, shadow-mask lights); dynamic lights
 - [x] Object enumeration through the engine's world tree (models, world models, sprites, particles, lights)
-- [ ] Step 4: world models (doors) transforms; step 5: models, sprites, particles, sky
+- [x] Sprites (billboards and rotatable), in game and in the menu background
+- [ ] Step 4: world models (doors) transforms; step 5: models, particles, sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
