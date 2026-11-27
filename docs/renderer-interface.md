@@ -319,3 +319,19 @@ surfaces as well as models. The D3D11 renderer sends the 16 nearest to the world
 colour / 255 × (1 − distance / radius) × N·L per pixel, with the face normal from screen-space
 derivatives. A thrown flare at strength 1 (cvar `avp2m_dlscale` 100) looks close to the stock
 renderer's glow. In "Unwelcome Guests" each marine's shoulder lamp is two such lights (radius about 100).
+
+## Global light on level surfaces
+
+The stock renderer also lights **vertex-lit** (gouraud) level surfaces with the global sky light
+(RenderStruct `+0x138` direction, `+0x144` colour) using N·L, on top of their baked vertex colours.
+In "Unwelcome Guests" the moonlight shines straight down, so ground is lit and vertical rock is not;
+without it the ground is visibly darker than in the stock renderer. Lightmapped surfaces show no
+such difference.
+
+## Screen locking
+
+`LockScreen(left, top, right, bottom, void **pixels, long *pitch)` (slot 31) locks a rectangle of the
+back buffer and returns 1, with `pixels` at the rectangle's top-left; `UnlockScreen()` (slot 32)
+releases it. The engine reads and writes the pixels directly in the screen format. It's called
+during loading. (The retail game's console stays hidden with the stock renderer too, so it isn't a
+renderer feature to match.)

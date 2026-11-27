@@ -86,6 +86,9 @@ static ID3D11RenderTargetView *g_bb_rtv;
 static uint32_t g_bb_w, g_bb_h;
 
 static ID3D11Texture2D          *g_rt_tex;     /* game-resolution render target */
+static ID3D11Texture2D          *g_scr_staging;   /* LockScreen readback */
+static uint8_t *g_scr_buf;
+static uint32_t g_scr_w, g_scr_h;
 /* HDR (cvar avp2m_hdr): the 3D scene renders into a float target and is
  * tone mapped into g_rt before the HUD is drawn, so the 2D layer stays exact. */
 static ID3D11Texture2D          *g_hdr_tex;
@@ -220,7 +223,7 @@ static const char k_hlsl3d[] =
     "struct VI { float3 p : POSITION; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
     "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; float3 wp : TEXCOORD2; };\n"
     "cbuffer W : register(b1) { float4 w0, w1, w2; };\n"
-    "cbuffer D : register(b2) { float4 dlc; float4 dlp[16]; float4 dlcol[16]; };\n"
+    "cbuffer D : register(b2) { float4 dlc; float4 dlp[16]; float4 dlcol[16]; float4 sund; float4 sunc; };\n"
     "float3 dyn(float3 wp) { float3 l = 0; int n = (int)dlc.x; if (n <= 0) return l;\n"
     "  float3 nn = normalize(cross(ddx(wp), ddy(wp)));\n"
     "  for (int k = 0; k < n; k++) { float3 d = dlp[k].xyz - wp; float dist = length(d) + 1e-4;\n"
@@ -233,6 +236,7 @@ static const char k_hlsl3d[] =
     "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5);\n"
     "  float3 lmc = lm.Sample(sl, i.luv).rgb * lmscale.x * i.c.a;\n"
     "  float3 l = (i.c.a > 0.5 ? lmc : i.c.rgb) + dyn(i.wp);\n"
+    "  if (sunc.w > 0.5 && i.c.a < 0.5) l += sunc.rgb * saturate(dot(normalize(cross(ddx(i.wp), ddy(i.wp))), sund.xyz));\n"
     "  if (lmscale.y > 3.5) return float4(lerp(dot(c.rgb, 0.33).xxx, i.c.a > 0.5 ? float3(1,0.2,0.2) : float3(0.2,1,0.2), 0.5), 1);\n"
     "  if (lmscale.y > 2.5) return float4(lmc, 1);\n"
     "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
@@ -387,7 +391,7 @@ static int create_objects(void)
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
     bd.ByteWidth = 48;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbw))) return 0;
-    bd.ByteWidth = 16 + 32 * 16;     /* dynamic lights: count/scale, 16 positions+radius, 16 colours */
+    bd.ByteWidth = 16 + 32 * 16 + 32;   /* dynamic lights: count/scale, 16 positions+radius, 16 colours; sun dir, colour */
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbdl))) return 0;
     bd.ByteWidth = 16;
     ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb_tm);
@@ -629,6 +633,8 @@ static void release_device(void)
     SAFE_RELEASE(g_hdr_rtv, ID3D11RenderTargetView);
     SAFE_RELEASE(g_hdr_tex, ID3D11Texture2D);
     SAFE_RELEASE(g_rt_rtv, ID3D11RenderTargetView);
+    SAFE_RELEASE(g_scr_staging, ID3D11Texture2D);
+    g_scr_w = g_scr_h = 0;
     SAFE_RELEASE(g_rt_tex, ID3D11Texture2D);
     SAFE_RELEASE(g_bb_rtv, ID3D11RenderTargetView);
     SAFE_RELEASE(g_swap, IDXGISwapChain);
@@ -2530,10 +2536,11 @@ static int mark_sky_bsps(RenderContext *rc, const uint8_t *sd, const float *camp
  * models). */
 #define MAX_DLIGHTS 16
 static float g_dl_scale = 1.0f;   /* cvar avp2m_dlscale x100 */
+static int g_world_sun = 1;       /* cvar avp2m_worldsun */
 static void write_dlights(const float *campos, int enable)
 {
     D3D11_MAPPED_SUBRESOURCE map;
-    float buf[4 + 8 * MAX_DLIGHTS];
+    float buf[4 + 8 * MAX_DLIGHTS + 8];
     float dd[MAX_DLIGHTS];
     uint32_t i, n = 0;
     static int dlog;
@@ -2579,6 +2586,18 @@ logged_dl:;
     }
     buf[0] = (float)n;
     buf[1] = g_dl_scale;
+    /* global (sky) light on vertex-lit level surfaces: RenderStruct +0x138 is
+       the direction the light travels, +0x144 its colour (0-255). The stock
+       renderer lights upward-facing vertex-lit ground with it (moonlight in
+       Unwelcome Guests); lightmapped surfaces already have it baked. */
+    if (enable && g_world_sun && g_rs && readable((const uint8_t *)g_rs + 0x138, 0x18)) {
+        const float *d = (const float *)((const uint8_t *)g_rs + 0x138), *c = d + 3;
+        float *sd = buf + 4 + 8 * MAX_DLIGHTS;
+        if (c[0] > 0 || c[1] > 0 || c[2] > 0) {
+            sd[0] = -d[0]; sd[1] = -d[1]; sd[2] = -d[2];
+            sd[4] = c[0] / 255.0f; sd[5] = c[1] / 255.0f; sd[6] = c[2] / 255.0f; sd[7] = 1;
+        }
+    }
     if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cbdl, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
         memcpy(map.pData, buf, sizeof buf);
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cbdl, 0);
@@ -2638,6 +2657,7 @@ static void render_world(const uint8_t *sd)
             g_hdr = cvar_int("avp2m_hdr", 0);
             g_particle_scale = (float)cvar_int("avp2m_psize", 100) / 100.0f;
             g_dl_scale = (float)cvar_int("avp2m_dlscale", 100) / 100.0f;
+            g_world_sun = cvar_int("avp2m_worldsun", 1);
             if (!(g_particle_scale > 0.01f && g_particle_scale < 100.0f)) g_particle_scale = 1.0f;
             g_model_sat = (float)cvar_int("avp2m_modelsat", 200) / 100.0f;
             if (!(g_model_sat > 0.05f && g_model_sat < 8.0f)) g_model_sat = 2.0f;
@@ -3412,8 +3432,66 @@ static void __cdecl r_delete_context(void *ctx)
     free(rc->batches);
     free(rc);
 }
-static void *__cdecl r_lock_screen(void)                     { return NULL; }
-static void __cdecl r_unlock_screen(void)                    { }
+/* Screen lock (the console and other software drawing): the stock renderer
+ * locks a rectangle of the back buffer and the engine reads and writes its
+ * pixels directly (32-bit 0x00RRGGBB, the screen format we report).
+ * LockScreen(left, top, right, bottom, void **pixels, long *pitch) returns 1
+ * on success with pixels pointing at the rectangle's top-left. We copy the
+ * rectangle of the game target into CPU memory and upload it on unlock. */
+static D3D11_BOX g_scr_box;
+static int g_scr_locked;
+static int __cdecl r_lock_screen(int l, int t, int r, int b, void **pixels, long *pitch)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    uint32_t y;
+    static int slog;
+    if (g_scr_locked || !g_dev || !g_rt_tex) return 0;
+    if (l < 0) l = 0;
+    if (t < 0) t = 0;
+    if (r > (int)g_w) r = (int)g_w;
+    if (b > (int)g_h) b = (int)g_h;
+    if (r <= l || b <= t) return 0;
+    if (!g_scr_staging || g_scr_w != g_w || g_scr_h != g_h) {
+        D3D11_TEXTURE2D_DESC td;
+        if (g_scr_staging) { ID3D11Texture2D_Release(g_scr_staging); g_scr_staging = NULL; }
+        free(g_scr_buf);
+        g_scr_buf = (uint8_t *)malloc((size_t)g_w * g_h * 4);
+        memset(&td, 0, sizeof td);
+        td.Width = g_w; td.Height = g_h;
+        td.MipLevels = td.ArraySize = 1;
+        td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        td.SampleDesc.Count = 1;
+        td.Usage = D3D11_USAGE_STAGING;
+        td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        if (!g_scr_buf || FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_scr_staging))) {
+            free(g_scr_buf); g_scr_buf = NULL; g_scr_staging = NULL;
+            return 0;
+        }
+        g_scr_w = g_w; g_scr_h = g_h;
+    }
+    flush_batch();
+    g_scr_box.left = (UINT)l; g_scr_box.top = (UINT)t; g_scr_box.right = (UINT)r; g_scr_box.bottom = (UINT)b;
+    g_scr_box.front = 0; g_scr_box.back = 1;
+    ID3D11DeviceContext_CopySubresourceRegion(g_ctx, (ID3D11Resource *)g_scr_staging, 0, (UINT)l, (UINT)t, 0,
+                                              (ID3D11Resource *)g_rt_tex, 0, &g_scr_box);
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_scr_staging, 0, D3D11_MAP_READ, 0, &map))) return 0;
+    for (y = (UINT)t; y < (UINT)b; y++)
+        memcpy(g_scr_buf + ((size_t)y * g_w + (UINT)l) * 4, (const uint8_t *)map.pData + (size_t)y * map.RowPitch + (size_t)l * 4,
+               (size_t)(r - l) * 4);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_scr_staging, 0);
+    if (pixels) *pixels = g_scr_buf + ((size_t)t * g_w + (UINT)l) * 4;
+    if (pitch) *pitch = (long)(g_w * 4);
+    g_scr_locked = 1;
+    if (slog < 3) { rlog("LockScreen(%d,%d,%d,%d)", l, t, r, b); slog++; }
+    return 1;
+}
+static void __cdecl r_unlock_screen(void)
+{
+    if (!g_scr_locked) return;
+    g_scr_locked = 0;
+    ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)g_rt_tex, 0, &g_scr_box,
+                                          g_scr_buf + ((size_t)g_scr_box.top * g_w + g_scr_box.left) * 4, g_w * 4, 0);
+}
 static int  __cdecl r_warp_to_screen(void *req)              { (void)req; return 0; }
 static void __cdecl r_make_screenshot(const char *file)      { rlog("MakeScreenShot(%s): not implemented yet", file ? file : "?"); }
 static void __cdecl r_read_console_variables(void)           { }
