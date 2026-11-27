@@ -149,6 +149,8 @@ static ID3D11DepthStencilState *g_ds_test;      /* depth test, no depth write */
 static ID3D11Buffer *g_cbw;                     /* b1: object-to-world rows (3 x float4) */
 #define MAX_SPRITES 2048
 static ID3D11Buffer *g_spr_vb, *g_spr_cvb;
+#define MAX_MODEL_VERTS (3 * 120000)
+static ID3D11Buffer *g_mdl_vb, *g_mdl_cvb;
 static ID3D11InputLayout  *g_layout3d;
 static ID3D11Buffer       *g_cb3d;
 static ID3D11Texture2D    *g_depth_tex;
@@ -338,6 +340,10 @@ static int create_objects(void)
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_spr_vb))) return 0;
     bd.ByteWidth = 4 * 6 * MAX_SPRITES;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_spr_cvb))) return 0;
+    bd.ByteWidth = sizeof(WVertex) * MAX_MODEL_VERTS;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_mdl_vb))) return 0;
+    bd.ByteWidth = 4 * MAX_MODEL_VERTS;
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_mdl_cvb))) return 0;
     {
         D3D11_DEPTH_STENCIL_DESC dd;
         memset(&dd, 0, sizeof dd);
@@ -545,6 +551,8 @@ static void release_device(void)
     SAFE_RELEASE(g_cbw, ID3D11Buffer);
     SAFE_RELEASE(g_spr_vb, ID3D11Buffer);
     SAFE_RELEASE(g_spr_cvb, ID3D11Buffer);
+    SAFE_RELEASE(g_mdl_vb, ID3D11Buffer);
+    SAFE_RELEASE(g_mdl_cvb, ID3D11Buffer);
     SAFE_RELEASE(g_ds_test, ID3D11DepthStencilState);
     SAFE_RELEASE(g_vs3d, ID3D11VertexShader);
     SAFE_RELEASE(g_rt_srv, ID3D11ShaderResourceView);
@@ -1387,6 +1395,189 @@ static uint8_t *g_vis_objs[MAX_VIS_OBJECTS];
 static uint32_t g_nvis_objs, g_nvis_seen;
 
 /* ------------------------------------------------------------------ */
+/* Models (characters, weapons, props)                                  */
+/* ------------------------------------------------------------------ */
+/* The engine animates the skeleton: model object vtable slot 18 (+0x48,
+ * thiscall, no arguments) returns one 4x4 (row-major, translation in the last
+ * column) per node, in model space. The renderer skins the vertices.
+ *   object +0x1C0..+0x1CC  skins: up to 4 SharedTexture pointers
+ *   object +0x1F8          model
+ *   model  +0x28 / +0x2C   node array / node count
+ *   model  +0x38 / +0x3C   piece pointers / piece count
+ *   piece  +0x04 / +0x08   vertices (0x20 bytes each) / count
+ *   piece  +0x14 / +0x18   triangles (0x20 bytes each) / count
+ *   piece  +0x40           skin index (tentative)
+ *   vertex +0x00 weights pointer, +0x04 u16 weight count,
+ *          +0x08 position, +0x14 normal (bind pose)
+ *   weight {float offset[3]; float weight; u32 node} (0x14 bytes): the
+ *          vertex is sum(weight * (node transform * offset))
+ *   triangle +0x00 u16 indices[3], +0x08 uv[3] (float pairs) */
+typedef const float *(__fastcall *PFN_NodeXforms)(void *self, void *edx);
+typedef struct MdlDraw { RTexture *tex; UINT first, count; } MdlDraw;
+
+static void xform34(const float *m, const float *v, float *o)
+{
+    o[0] = m[0] * v[0] + m[1] * v[1] + m[2] * v[2] + m[3];
+    o[1] = m[4] * v[0] + m[5] * v[1] + m[6] * v[2] + m[7];
+    o[2] = m[8] * v[0] + m[9] * v[1] + m[10] * v[2] + m[11];
+}
+static void rot33(const float *m, const float *v, float *o)
+{
+    o[0] = m[0] * v[0] + m[1] * v[1] + m[2] * v[2];
+    o[1] = m[4] * v[0] + m[5] * v[1] + m[6] * v[2];
+    o[2] = m[8] * v[0] + m[9] * v[1] + m[10] * v[2];
+}
+
+/* Object-to-world 3x4 from position, rotation quaternion and scale. */
+static void object_matrix(const uint8_t *o, const float *campos, const float *cr, const float *cu,
+                          const float *cf, float *m)
+{
+    const float *pos = (const float *)(o + OBJ_POS), *sc = (const float *)(o + 0xAC);
+    float r[3], u[3], f[3];
+    int k;
+    quat_basis((const float *)(o + 0x9C), r, u, f);
+    for (k = 0; k < 3; k++) {          /* columns are the scaled basis vectors */
+        m[k * 4 + 0] = r[k] * sc[0];
+        m[k * 4 + 1] = u[k] * sc[1];
+        m[k * 4 + 2] = f[k] * sc[2];
+        m[k * 4 + 3] = pos[k];
+    }
+    if (RD32(o, OBJ_FLAGS) & 0x40) {   /* "really close": camera space */
+        float w[12];
+        for (k = 0; k < 4; k++) {
+            int a;
+            for (a = 0; a < 3; a++)
+                w[a * 4 + k] = cr[a] * m[0 * 4 + k] + cu[a] * m[1 * 4 + k] + cf[a] * m[2 * 4 + k] +
+                               (k == 3 ? campos[a] : 0.0f);
+        }
+        memcpy(m, w, sizeof w);
+    }
+}
+
+static void draw_models(const float *campos, const float *cr, const float *cu, const float *cf)
+{
+    static MdlDraw list[1024];
+    static float skinned[4096 * 3];
+    static uint32_t light[4096];
+    D3D11_MAPPED_SUBRESOURCE mv, mc;
+    WVertex *vv;
+    uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0;
+    static int logged;
+    float bf[4] = { 0, 0, 0, 0 };
+
+    if (!g_mdl_vb) return;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_mdl_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mv))) return;
+    if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_mdl_cvb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mc))) {
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_vb, 0);
+        return;
+    }
+    vv = (WVertex *)mv.pData;
+    cc = (uint32_t *)mc.pData;
+    for (i = 0; i < g_nvis_objs; i++) {
+        uint8_t *o = g_vis_objs[i];
+        const uint8_t *m, *pieces;
+        const float *nodes;
+        uint32_t nnodes, npieces, pi;
+        float om[12];
+        if (o[OBJ_TYPE] != 1 || !readable(o, 0x200) || o[0x97] == 0) continue;
+        m = RDPTR(o, 0x1F8);
+        if (!readable(m, 0x80)) continue;
+        nnodes = RD32(m, 0x2C);
+        npieces = RD32(m, 0x3C);
+        pieces = RDPTR(m, 0x38);
+        if (!nnodes || nnodes > 512 || !npieces || npieces > 64 || !readable(pieces, npieces * 4)) continue;
+        if (!readable(RDPTR(o, 0), 0x4C)) continue;
+        nodes = ((PFN_NodeXforms)(void *)(uintptr_t)RD32(RDPTR(o, 0), 0x48))(o, NULL);
+        if (!readable(nodes, nnodes * 64)) continue;
+        object_matrix(o, campos, cr, cu, cf, om);
+        nmodels++;
+        for (pi = 0; pi < npieces; pi++) {
+            const uint8_t *pc = RDPTR(pieces, pi * 4), *verts, *tris;
+            uint32_t nverts, ntris, vi, ti, skin;
+            RTexture *tex = NULL;
+            if (!readable(pc, 0x44)) continue;
+            verts = RDPTR(pc, 0x04); nverts = RD32(pc, 0x08);
+            tris = RDPTR(pc, 0x14); ntris = RD32(pc, 0x18);
+            if (!nverts || nverts > 4096 || !ntris || !readable(verts, nverts * 0x20) || !readable(tris, ntris * 0x20))
+                continue;
+            if (nv_out + ntris * 3 > MAX_MODEL_VERTS || nd >= 1024) break;
+            skin = RD32(pc, 0x40);
+            if (skin > 3) skin = 0;
+            if (RD32(o, 0x1C0 + skin * 4)) tex = get_texture((void *)(uintptr_t)RD32(o, 0x1C0 + skin * 4));
+            if (!tex && RD32(o, 0x1C0)) tex = get_texture((void *)(uintptr_t)RD32(o, 0x1C0));
+            for (vi = 0; vi < nverts; vi++) {
+                const uint8_t *v = verts + vi * 0x20, *w = RDPTR(v, 0);
+                uint32_t nw = *(const uint16_t *)(v + 4), k;
+                float acc[3] = { 0, 0, 0 }, nrm[3] = { 0, 0, 0 }, wp[3], n2[3];
+                if (nw > 8 || !readable(w, nw * 0x14)) nw = 0;
+                for (k = 0; k < nw; k++) {
+                    const float *ww = (const float *)(w + k * 0x14);
+                    uint32_t node = *(const uint32_t *)(w + k * 0x14 + 0x10);
+                    float t[3], tn[3];
+                    if (node >= nnodes) continue;
+                    xform34(nodes + node * 16, ww, t);
+                    rot33(nodes + node * 16, (const float *)(v + 0x14), tn);
+                    acc[0] += t[0] * ww[3]; acc[1] += t[1] * ww[3]; acc[2] += t[2] * ww[3];
+                    nrm[0] += tn[0] * ww[3]; nrm[1] += tn[1] * ww[3]; nrm[2] += tn[2] * ww[3];
+                }
+                if (!nw) memcpy(acc, v + 8, sizeof acc);
+                xform34(om, acc, wp);
+                memcpy(skinned + vi * 3, wp, sizeof wp);
+                rot33(om, nrm, n2);
+                {   /* simple light until the world light grid is mapped */
+                    float len = sqrtf(n2[0] * n2[0] + n2[1] * n2[1] + n2[2] * n2[2]) + 1e-6f;
+                    float l = 0.45f + 0.35f * ((n2[1] / len) * 0.8f + 0.2f);
+                    uint32_t c = (uint32_t)((l < 0 ? 0 : l > 1 ? 1 : l) * 255.0f);
+                    light[vi] = c | (c << 8) | (c << 16);
+                }
+            }
+            list[nd].tex = tex;
+            list[nd].first = nv_out;
+            for (ti = 0; ti < ntris; ti++) {
+                const uint8_t *t = tris + ti * 0x20;
+                const float *uv = (const float *)(t + 8);
+                int c;
+                for (c = 0; c < 3; c++) {
+                    uint32_t idx = ((const uint16_t *)t)[c];
+                    WVertex *w = vv + nv_out;
+                    if (idx >= nverts) idx = 0;
+                    w->x = skinned[idx * 3]; w->y = skinned[idx * 3 + 1]; w->z = skinned[idx * 3 + 2];
+                    w->u = uv[c * 2]; w->v = uv[c * 2 + 1];
+                    w->lu = w->lv = 0;
+                    w->rgba = 0;
+                    cc[nv_out] = light[idx];
+                    nv_out++;
+                }
+            }
+            list[nd].count = nv_out - list[nd].first;
+            nd++;
+        }
+    }
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_vb, 0);
+    ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_cvb, 0);
+    if (logged < 2) { rlog("models: %lu drawn, %lu pieces, %lu vertices", (unsigned long)nmodels, (unsigned long)nd, (unsigned long)nv_out); logged++; }
+    if (!nd) return;
+    {
+        ID3D11Buffer *vbs[2] = { g_mdl_vb, g_mdl_cvb };
+        UINT strides[2] = { sizeof(WVertex), 4 }, offs[2] = { 0, 0 };
+        ID3D11SamplerState *ss[2] = { g_samp_wrap, g_samp_linear };
+        ID3D11DeviceContext_IASetVertexBuffers(g_ctx, 0, 2, vbs, strides, offs);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 2, ss);
+        ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_on, 0);
+        ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[OPT2D_SOLID], bf, 0xFFFFFFFFu);
+        ID3D11DeviceContext_RSSetState(g_ctx, g_rast);
+    }
+    for (i = 0; i < nd; i++) {
+        ID3D11ShaderResourceView *srv[2];
+        srv[0] = list[i].tex ? list[i].tex->srv : g_white_srv;
+        srv[1] = g_white_srv;
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
+        ID3D11DeviceContext_Draw(g_ctx, list[i].count, list[i].first);
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* Sprites                                                              */
 /* ------------------------------------------------------------------ */
 /* Sprite objects (type 3): +0x1B4 sprite, +0x1B8 pointer to the current
@@ -1688,6 +1879,7 @@ static void render_world(const uint8_t *sd)
     }
 
     set_world_rows(NULL);
+    draw_models(pos, r, u, f);
     draw_sprites(pos, r, u, f);
 
     /* back to the 2D pipeline */
@@ -1867,6 +2059,66 @@ static int cmp_ptr(const void *a, const void *b)
     return (x > y) - (x < y);
 }
 
+/* Diagnostics for the model format: the object's model (+0x1F8), its
+ * animated node transforms (object vtable slot 18, thiscall, no arguments;
+ * count at model+0x78) and candidate piece arrays. */
+typedef const float *(__fastcall *PFN_GetNodeTransforms)(void *self, void *edx);
+static void dump_model(uint8_t *o)
+{
+    const uint8_t *m = RDPTR(o, 0x1F8);
+    uint32_t nn, k;
+    rlog("model object %p, model %p, tracker +1d0:", (void *)o, (void *)m);
+    rlog_dump("  trk", o + 0x1D0, 0x60);
+    rlog_dump("  obj+1a0", o + 0x1A0, 0x60);
+    {
+        uint32_t q;
+        for (q = 0x1A0; q < 0x200; q += 4) {
+            const uint8_t *t = RDPTR(o, q);
+            if ((uintptr_t)t > 0x10000 && readable(t, 0x20)) {
+                char tag[24];
+                sprintf(tag, "  obj+%03lx", (unsigned long)q);
+                rlog_dump(tag, t, 0x20);
+            }
+        }
+    }
+    rlog_dump("  mdl", m, 0x180);
+    nn = RD32(m, 0x78);
+    if (readable(RDPTR(o, 0), 0x4C) && nn && nn < 256) {
+        const float *x = ((PFN_GetNodeTransforms)(void *)(uintptr_t)RD32(RDPTR(o, 0), 0x48))(o, NULL);
+        rlog("  %lu nodes, transforms at %p", (unsigned long)nn, (const void *)x);
+        for (k = 0; k < nn && k < 3 && readable(x, (k + 1) * 64); k++) {
+            const float *q = x + k * 16;
+            rlog("   node %lu: %d %d %d %d | %d %d %d %d | %d %d %d %d (x1000)", (unsigned long)k,
+                 (int)(q[0] * 1000), (int)(q[1] * 1000), (int)(q[2] * 1000), (int)(q[3] * 1000),
+                 (int)(q[4] * 1000), (int)(q[5] * 1000), (int)(q[6] * 1000), (int)(q[7] * 1000),
+                 (int)(q[8] * 1000), (int)(q[9] * 1000), (int)(q[10] * 1000), (int)(q[11] * 1000));
+        }
+    }
+    {   /* pieces: array at model+0x38 (count +0x3C); each piece has vertex and triangle arrays */
+        const uint8_t *pa = RDPTR(m, 0x38);
+        uint32_t np = RD32(m, 0x3C), pi;
+        for (pi = 0; pi < np && pi < 2 && readable(pa, (pi + 1) * 4); pi++) {
+            const uint8_t *pc = RDPTR(pa, pi * 4), *vv, *tt;
+            rlog("  piece %lu at %p", (unsigned long)pi, (const void *)pc);
+            rlog_dump("   pc", pc, 0x80);
+            vv = RDPTR(pc, 0x04);
+            tt = RDPTR(pc, 0x14);
+            rlog_dump("   verts", vv, 0xC0);
+            rlog_dump("   tris", tt, 0x80);
+            if (readable(vv, 0x10)) rlog_dump("   v0 weights", RDPTR(vv, 0), 0x40);
+        }
+    }
+    /* follow every pointer-looking dword of the model one level */
+    for (k = 0; k < 0x180; k += 4) {
+        const uint8_t *p = RDPTR(m, k);
+        if ((uintptr_t)p > 0x10000 && readable(p, 0x40)) {
+            char tag[24];
+            sprintf(tag, "  mdl+%03lx", (unsigned long)k);
+            rlog_dump(tag, p, 0x40);
+        }
+    }
+}
+
 static void collect_objects(const uint8_t *world, const float *eye)
 {
     VisQuery q;
@@ -1912,7 +2164,10 @@ static void collect_objects(const uint8_t *world, const float *eye)
         }
         if (logged == 2) {
             for (i = 0; i < g_nvis_objs; i++) {
-                if (g_vis_objs[i][OBJ_TYPE] == 1) { rlog_dump("  model", g_vis_objs[i], 0x300); break; }
+                if (g_vis_objs[i][OBJ_TYPE] == 1 && !(RD32(g_vis_objs[i], OBJ_FLAGS) & 0x40)) {
+                    dump_model(g_vis_objs[i]);
+                    break;
+                }
             }
             for (i = 0; i < g_nvis_objs; i++) {
                 if (g_vis_objs[i][OBJ_TYPE] == 3) { rlog_dump("  sprite", g_vis_objs[i], 0x200); break; }

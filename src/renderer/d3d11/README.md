@@ -18,10 +18,11 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
 - Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
 - World models (doors, lifts, rotating parts) follow their current transform.
+- Models: characters, creatures and the first-person weapon and arms, animated by the engine's skeleton and skinned here. Lighting on models is a simple placeholder for now.
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
-- Animated and dynamic lights (flickering lights, muzzle flashes, flares), the sky, characters and weapons (models), particles
+- Animated and dynamic lights (flickering lights, muzzle flashes, flares), the sky, particles, proper model lighting
 - No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots

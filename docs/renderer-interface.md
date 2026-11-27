@@ -198,6 +198,27 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 
 **Sprites** (type 3): size is texture pixels × scale (`+0xAC` x, `+0xB0` y); color bytes `+0x94`–`+0x97` are r, g, b, a. Flags `+0x88`: `0x08` rotatable (quad oriented by the object's rotation instead of facing the camera), `0x20` scales with distance (glows), `0x40` "really close" (position is in camera space), `0x200` not lit by the world. Flags 2 `+0x8C`: `0x04` additive (ONE, ONE), `0x08` multiply (ZERO, SRCCOLOR), otherwise alpha blend.
 
+**Models** (type 1). The engine animates the skeleton; the renderer skins:
+
+| Field | Meaning |
+|---|---|
+| object vtable slot 18 (`+0x48`) | thiscall, no arguments: returns one 4×4 per node (row-major, translation in the last column), in model space |
+| object `+0x1C0`–`+0x1CC` | skins: up to 4 SharedTexture pointers |
+| object `+0x1F8` | model |
+| model `+0x04` | file name, e.g. `models\props\flyingcreature.abc` |
+| model `+0x28` / `+0x2C` | node array / node count |
+| model `+0x38` / `+0x3C` | piece pointers / piece count |
+| model `+0x74` / `+0x78` | scratch array the stock renderer fills with per-node matrices / count |
+| piece `+0x04` / `+0x08` | vertices (0x20 bytes) / count |
+| piece `+0x14` / `+0x18` | triangles (0x20 bytes) / count |
+| piece `+0x34` | further LODs (array, tentative) |
+| piece `+0x40` / `+0x48` | skin index (tentative) / name, e.g. `Torso` |
+| vertex | `+0x00` weights pointer, `+0x04` u16 weight count, `+0x08` bind position, `+0x14` normal |
+| weight (0x14 bytes) | `float offset[3]; float weight; u32 node`. The skinned position is the sum of `weight × (node transform × offset)` |
+| triangle | `+0x00` u16 indices[3], `+0x08` three (u, v) float pairs |
+
+The object matrix comes from position `+0x194`, rotation `+0x9C` and scale `+0xAC`; objects flagged `0x40` ("really close", the first-person weapon and arms) are in camera space.
+
 **Menus** (draw mode 2) draw only the SceneDesc object list (`+0xF4` / `+0xF8`): the main menu's starfield and planets are sprites, plus one model.
 
 **SceneDesc** (argument of RenderScene):
@@ -235,5 +256,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Object enumeration through the engine's world tree (models, world models, sprites, particles, lights)
 - [x] Sprites (billboards and rotatable), in game and in the menu background
 - [x] Step 4: world models (doors, lifts, rotating parts) drawn with their current transform
-- [ ] Step 5: models, particles, sky
+- [x] Step 5a: models (characters, first-person weapon and arms), skinned on the CPU from the engine's node transforms
+- [ ] Model lighting (world light grid, dynamic lights), LODs, translucent models, attachments; particles; sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
