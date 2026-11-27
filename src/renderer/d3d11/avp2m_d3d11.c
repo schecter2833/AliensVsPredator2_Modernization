@@ -174,7 +174,7 @@ static ID3D11VertexShader *g_vs3d;
 static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
 static ID3D11DepthStencilState *g_ds_test;      /* depth test, no depth write */
 static ID3D11Buffer *g_cbw;                     /* b1: object-to-world rows (3 x float4) */
-#define MAX_SPRITES 2048
+#define MAX_SPRITES 16384             /* sprites plus particles */
 static ID3D11Buffer *g_spr_vb, *g_spr_cvb;
 #define MAX_MODEL_VERTS (3 * 120000)
 static ID3D11Buffer *g_mdl_vb, *g_mdl_cvb;
@@ -1860,6 +1860,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
 #define SPR_ALPHA 2
 typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first; } SprDraw;
 static float g_spr_scale = 0.5f;        /* half size per texel per unit scale (tunable) */
+static float g_particle_scale = 1.0f;   /* particle half size per unit of particle size; cvar avp2m_psize x100 */
 
 static int cmp_spr(const void *a, const void *b)
 {
@@ -1873,7 +1874,7 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
     static SprDraw list[MAX_SPRITES];
     D3D11_MAPPED_SUBRESOURCE mv, mc;
     WVertex *vv;
-    uint32_t *cc, i, n = 0;
+    uint32_t *cc, i, n = 0, nspr = 0;
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
 
@@ -1942,9 +1943,78 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
         list[n].first = n * 6;
         n++;
     }
+
+    /* Particle systems (type 6): +0x1F0 SharedTexture, +0x1D0 first particle,
+     * +0x230 particle count; the list ends at the sentinel at +0x1B0.
+     * Particle: +0x0C color (3 floats, 0..255), +0x18 alpha (0..1), +0x1C size,
+     * +0x20 next, +0x24 position in system space (the object's transform
+     * applies). Drawn as camera-facing quads. */
+    nspr = n;
+    for (i = 0; i < g_nvis_objs && n < MAX_SPRITES; i++) {
+        const uint8_t *o = g_vis_objs[i], *pt, *sentinel;
+        RTexture *tex;
+        float om[12];
+        uint32_t fl2, cnt, guard = 0;
+        int blend;
+        if (o[OBJ_TYPE] != 6 || !readable(o, 0x240) || !RD32(o, 0x1F0)) continue;
+        tex = get_texture((void *)(uintptr_t)RD32(o, 0x1F0));
+        if (!tex) continue;
+        object_matrix(o, campos, cr, cu, cf, om);
+        fl2 = RD32(o, OBJ_FLAGS2);
+        blend = (fl2 & 4) ? SPR_ADD : (fl2 & 8) ? SPR_MUL : SPR_ALPHA;
+        sentinel = o + 0x1B0;
+        cnt = RD32(o, 0x230);
+        for (pt = RDPTR(o, 0x1D0); pt && pt != sentinel && guard < cnt + 1 && n < MAX_SPRITES; pt = RDPTR(pt, 0x20), guard++) {
+            const float *pf;
+            float p[3], hs, d;
+            uint32_t col, cr8, cg8, cb8, ca8;
+            int k;
+            if (!readable(pt, 0x30)) break;
+            pf = (const float *)pt;
+            xform34(om, pf + 9, p);                    /* +0x24 */
+            d = (p[0] - campos[0]) * cf[0] + (p[1] - campos[1]) * cf[1] + (p[2] - campos[2]) * cf[2];
+            if (d < 1.0f) continue;
+            hs = pf[7] * g_particle_scale;             /* +0x1C */
+            if (!(hs > 0)) continue;
+            cr8 = (uint32_t)(fminf(fmaxf(pf[3] * o[0x94] / 255.0f, 0), 255));
+            cg8 = (uint32_t)(fminf(fmaxf(pf[4] * o[0x95] / 255.0f, 0), 255));
+            cb8 = (uint32_t)(fminf(fmaxf(pf[5] * o[0x96] / 255.0f, 0), 255));
+            ca8 = (uint32_t)(fminf(fmaxf(pf[6] * o[0x97], 0), 255));
+            col = cr8 | (cg8 << 8) | (cb8 << 16) | (ca8 << 24);
+            {
+                static const float cx[6] = { -1, 1, 1, -1, 1, -1 }, cy[6] = { 1, 1, -1, 1, -1, -1 };
+                WVertex *w = vv + n * 6;
+                for (k = 0; k < 6; k++) {
+                    int a;
+                    for (a = 0; a < 3; a++) (&w[k].x)[a] = p[a] + cr[a] * hs * cx[k] + cu[a] * hs * cy[k];
+                    w[k].u = cx[k] > 0 ? 1.0f : 0.0f;
+                    w[k].v = cy[k] > 0 ? 0.0f : 1.0f;
+                    w[k].lu = w[k].lv = 0;
+                    w[k].rgba = 0;
+                    cc[n * 6 + k] = col;
+                }
+            }
+            list[n].tex = tex;
+            list[n].blend = blend;
+            list[n].depth = d;
+            list[n].first = n * 6;
+            n++;
+        }
+    }
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_vb, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_spr_cvb, 0);
     if (logged < 2) { rlog("sprites: %lu drawn", (unsigned long)n); logged++; }
+    {   /* in-game particle diagnostics (menu frames don't count) */
+        static int plog;
+        if (plog < 3 && g_cur_sd && RD32(g_cur_sd, 0) == 1) {
+            uint32_t q, nsys = 0, ncull = 0;
+            for (q = 0; q < g_nvis_objs; q++) if (g_vis_objs[q][OBJ_TYPE] == 6) nsys++;
+            (void)ncull;
+            rlog("particles: %lu systems visible, %lu particle quads, %lu sprite quads",
+                 (unsigned long)nsys, (unsigned long)(n - nspr), (unsigned long)nspr);
+            plog++;
+        }
+    }
     if (!n) return;
     qsort(list, n, sizeof list[0], cmp_spr);
     {
@@ -2140,6 +2210,8 @@ static void render_world(const uint8_t *sd)
             g_lmscale = (sc > 0.05f && sc < 8.0f) ? sc : 1.0f;
             g_lmdebug = cvar_int("avp2m_lmdebug", 0);
             g_hdr = cvar_int("avp2m_hdr", 0);
+            g_particle_scale = (float)cvar_int("avp2m_psize", 100) / 100.0f;
+            if (!(g_particle_scale > 0.01f && g_particle_scale < 100.0f)) g_particle_scale = 1.0f;
             g_model_sat = (float)cvar_int("avp2m_modelsat", 200) / 100.0f;
             if (!(g_model_sat > 0.05f && g_model_sat < 8.0f)) g_model_sat = 2.0f;
             g_exposure = (float)cvar_int("avp2m_exposure", 100) / 100.0f;
@@ -2541,6 +2613,21 @@ static void collect_objects(const uint8_t *world, const float *eye)
             }
             for (i = 0; i < g_nvis_objs; i++) {
                 if (g_vis_objs[i][OBJ_TYPE] == 4) { rlog_dump("  light", g_vis_objs[i], 0x200); break; }
+            }
+            for (i = 0; i < g_nvis_objs; i++) {
+                if (g_vis_objs[i][OBJ_TYPE] == 6) {
+                    uint32_t q;
+                    rlog_dump("  psys", g_vis_objs[i], 0x280);
+                    for (q = 0x1A0; q < 0x280; q += 4) {
+                        const uint8_t *t = RDPTR(g_vis_objs[i], q);
+                        if ((uintptr_t)t > 0x10000 && readable(t, 0x40)) {
+                            char tag[24];
+                            sprintf(tag, "  psys+%03lx", (unsigned long)q);
+                            rlog_dump(tag, t, 0x40);
+                        }
+                    }
+                    break;
+                }
             }
         }
     }
