@@ -196,7 +196,7 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 | `+0x1F8` | world models: current transform, 4×4 floats, row-major, translation in the last column. Identity until the object moves |
 | `+0x1B4` / `+0x1B8` | sprites: sprite pointer / current frame entry (first dword = the frame's SharedTexture) |
 
-**Sprites** (type 3): size is texture pixels × scale (`+0xAC` x, `+0xB0` y); color bytes `+0x94`–`+0x97` are r, g, b, a. Flags `+0x88`: `0x08` rotatable (quad oriented by the object's rotation instead of facing the camera), `0x20` scales with distance (glows), `0x40` "really close" (position is in camera space), `0x200` not lit by the world. Flags 2 `+0x8C`: `0x04` additive (ONE, ONE), `0x08` multiply (ZERO, SRCCOLOR), otherwise alpha blend.
+**Sprites** (type 3): half-size is texture pixels × scale (corners at ±width, ±height; stock `0x1002E310`), so the full size is twice that (`+0xAC` x, `+0xB0` y); color bytes `+0x94`–`+0x97` are r, g, b, a. Flags `+0x88`: `0x08` rotatable (quad oriented by the object's rotation instead of facing the camera), `0x20` scales with distance (glows), `0x40` "really close" (position is in camera space), `0x200` not lit by the world. Flags 2 `+0x8C`: `0x04` additive (ONE, ONE), `0x08` multiply (ZERO, SRCCOLOR), otherwise alpha blend.
 
 **Models** (type 1). The engine animates the skeleton; the renderer skins:
 
@@ -212,7 +212,7 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 | piece `+0x04` / `+0x08` | vertices (0x20 bytes) / count |
 | piece `+0x14` / `+0x18` | triangles (0x20 bytes) / count |
 | piece `+0x34` | further LODs (array, tentative) |
-| piece `+0x40` / `+0x48` | skin index (tentative) / name, e.g. `Torso` |
+| piece `+0x24` / `+0x48` | skin index (read by both stock renderers at `0x1000447A`) / name, e.g. `Torso` |
 | vertex | `+0x00` weights pointer, `+0x04` u16 weight count, `+0x08` bind position, `+0x14` normal |
 | weight (0x14 bytes) | `float offset[3]; float weight; u32 node`. The skinned position is the sum of `weight × (node transform × offset)` |
 | triangle | `+0x00` u16 indices[3], `+0x08` three (u, v) float pairs |
@@ -355,7 +355,9 @@ where AVP2's reads `+0x1F8` and `+0x1D0`. Skins (`+0x1C0`) and the other object 
 model offset on the first model it sees (the slot that points at a Model whose first dword is a vtable in
 the engine executable).
 
+Hidden pieces: a bitmask (one bit per piece index) at object `+0x24C` in AVP2 and `+0x260` in PH; the
+stock renderers skip those pieces (`test [reg+0x24C/0x260], eax` at `0x1000443C` and `0x100057D1` in both).
+
 Status: with the in-memory `object.lto` fix, Zeta Site loads and plays with the D3D11 renderer (world,
-skinned models, attachments, subtitles). Known PH-only issues: menu background images are drawn at their
-native size in the middle of the screen instead of filling it, and the 3D character portrait on the
-single-player menu isn't drawn.
+skinned models, attachments, subtitles), and the PH menus match the stock renderer (full-screen
+nebula background, correctly skinned character portrait).

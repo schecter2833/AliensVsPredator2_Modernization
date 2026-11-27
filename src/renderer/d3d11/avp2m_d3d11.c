@@ -138,7 +138,8 @@ typedef struct WVertex { float x, y, z, u, v, lu, lv; uint32_t rgba; } WVertex;
 typedef struct RTexture {
     ID3D11Texture2D *tex;
     ID3D11ShaderResourceView *srv;
-    uint32_t w, h;
+    uint32_t w, h;                   /* uploaded size (top mip the engine gave us) */
+    uint32_t bw, bh;                 /* DTX base size; larger when detail settings drop top mips */
     void *shared;                    /* engine SharedTexture */
     struct RTexture *next;
 } RTexture;
@@ -949,6 +950,17 @@ static RTexture *create_texture(void *shared)
     }
     rt->w = w;
     rt->h = h;
+    {   /* DTX header at TextureData +0x08: base width/height (u16) at +0x10/+0x12 */
+        uint32_t bw = *(const uint16_t *)(td + 0x10), bh = *(const uint16_t *)(td + 0x12);
+        static int blog;
+        rt->bw = (bw >= w && bw <= 8192) ? bw : w;
+        rt->bh = (bh >= h && bh <= 8192) ? bh : h;
+        if ((rt->bw != w || rt->bh != h) && blog < 10) {
+            rlog("texture %p: loaded %lux%lu, base size %lux%lu", shared, (unsigned long)w, (unsigned long)h,
+                 (unsigned long)rt->bw, (unsigned long)rt->bh);
+            blog++;
+        }
+    }
     rt->shared = shared;
     rt->next = g_textures;
     g_textures = rt;
@@ -1019,6 +1031,7 @@ static void cross3(const float *a, const float *b, float *o)
 
 static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
 static const uint8_t *obj_model(const uint8_t *o);
+static uint32_t g_model_off;      /* model objects: Model pointer at +0x1F8 (AVP2) or +0x1FC (PH) */
 static int lm_decode(const uint8_t *src, uint32_t size, uint32_t *dst, uint32_t count)
 {
     const uint8_t *end = src + size;
@@ -1609,7 +1622,7 @@ static uint32_t g_nvis_objs, g_nvis_seen;
  *   model  +0x38 / +0x3C   piece pointers / piece count
  *   piece  +0x04 / +0x08   vertices (0x20 bytes each) / count
  *   piece  +0x14 / +0x18   triangles (0x20 bytes each) / count
- *   piece  +0x40           skin index (tentative)
+ *   piece  +0x24           skin index (stock d3d.ren 0x1000447A)
  *   vertex +0x00 weights pointer, +0x04 u16 weight count,
  *          +0x08 position, +0x14 normal (bind pose)
  *   weight {float offset[3]; float weight; u32 node} (0x14 bytes): the
@@ -1835,7 +1848,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
         uint8_t *o = g_vis_objs[i];
         const uint8_t *m, *pieces;
         const float *nodes;
-        uint32_t nnodes, npieces, pi;
+        uint32_t nnodes, npieces, pi, hidden;
         float om[12];
         if (o[OBJ_TYPE] != 1 || !readable(o, 0x200) || o[0x97] == 0) continue;
         m = obj_model(o);
@@ -1908,17 +1921,41 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                 mlog++;
             }
         }
+        /* hidden pieces: one bit per piece index at object +0x24C (AVP2) or
+           +0x260 (Primal Hunt), tested by the stock renderer before drawing */
+        hidden = readable(o, 0x264) ? RD32(o, g_model_off == 0x1FC ? 0x260 : 0x24C) : 0;
+        {   /* diagnostics: describe each model object's pieces once */
+            static const uint8_t *seenm[64];
+            static int nseenm;
+            int q;
+            for (q = 0; q < nseenm && seenm[q] != o; q++) ;
+            if (q == nseenm && nseenm < 32) {
+                char line[512];
+                int len;
+                uint32_t pj;
+                seenm[nseenm++] = o;
+                len = sprintf(line, "model %p pieces %lu hidden %08lx skins %08lx %08lx %08lx %08lx %08lx:", (const void *)o,
+                              (unsigned long)npieces, (unsigned long)hidden, (unsigned long)RD32(o, 0x1C0), (unsigned long)RD32(o, 0x1C4),
+                              (unsigned long)RD32(o, 0x1C8), (unsigned long)RD32(o, 0x1CC), (unsigned long)RD32(o, 0x1D0));
+                for (pj = 0; pj < npieces && pj < 24 && len < 440; pj++) {
+                    const uint8_t *pp = RDPTR(pieces, pj * 4);
+                    len += sprintf(line + len, " %lu", readable(pp, 0x44) ? (unsigned long)RD32(pp, 0x24) : 99ul);
+                }
+                rlog("%s", line);
+            }
+        }
         for (pi = 0; pi < npieces; pi++) {
             const uint8_t *pc = RDPTR(pieces, pi * 4), *verts, *tris;
             uint32_t nverts, ntris, vi, ti, skin;
             RTexture *tex = NULL;
+            if (pi < 32 && (hidden & (1u << pi))) continue;
             if (!readable(pc, 0x44)) continue;
             verts = RDPTR(pc, 0x04); nverts = RD32(pc, 0x08);
             tris = RDPTR(pc, 0x14); ntris = RD32(pc, 0x18);
             if (!nverts || nverts > 4096 || !ntris || !readable(verts, nverts * 0x20) || !readable(tris, ntris * 0x20))
                 continue;
             if (nv_out + ntris * 3 > MAX_MODEL_VERTS || nd >= 1024) break;
-            skin = RD32(pc, 0x40);
+            skin = RD32(pc, 0x24);   /* skin index: piece +0x24, as both stock renderers read it (d3d.ren 0x1000447a) */
             if (skin > 3) skin = 0;
             if (RD32(o, 0x1C0 + skin * 4)) tex = get_texture((void *)(uintptr_t)RD32(o, 0x1C0 + skin * 4));
             if (!tex && RD32(o, 0x1C0)) tex = get_texture((void *)(uintptr_t)RD32(o, 0x1C0));
@@ -2055,7 +2092,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
 #define SPR_ALPHA 2
 #define SPR_SOLID 3
 typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first, count; int nodepth; } SprDraw;
-static float g_spr_scale = 0.5f;        /* half size per texel per unit scale (tunable) */
+static float g_spr_scale = 1.0f;        /* half size per texel per unit scale: the stock renderer puts the corners at +-texture size (d3d.ren 0x1002e310) */
 static float g_particle_scale = 1.0f;   /* extra particle size multiplier; cvar avp2m_psize x100 */
 static float g_cur_xfov = 1.5708f;      /* horizontal FOV of the current scene (radians) */
 
@@ -2270,9 +2307,25 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
         } else {
             memcpy(r, cr, sizeof r); memcpy(u, cu, sizeof u);
         }
-        hx = (float)tex->w * sc[0] * g_spr_scale;
-        hy = (float)tex->h * sc[1] * g_spr_scale;
+        hx = (float)tex->bw * sc[0] * g_spr_scale;   /* base size: sprite size doesn't follow texture detail */
+        hy = (float)tex->bh * sc[1] * g_spr_scale;
         d = (p[0] - campos[0]) * cf[0] + (p[1] - campos[1]) * cf[1] + (p[2] - campos[2]) * cf[2];
+        {   /* menu sprites (draw mode 2): describe each once (diagnostics) */
+            static const uint8_t *seen[32];
+            static int nseen;
+            int q;
+            if (g_cur_sd && RD32(g_cur_sd, 0) == 2) {
+                for (q = 0; q < nseen && seen[q] != o; q++) ;
+                if (q == nseen && nseen < 32) {
+                    seen[nseen++] = o;
+                    rlog("menu sprite %p: pos x100 %d,%d,%d scale x100 %d,%d flags %08lx flags2 %08lx tex %lux%lu (base %lux%lu) rgba %02x%02x%02x%02x xfov x100 %d",
+                         (const void *)o, (int)(pos[0] * 100), (int)(pos[1] * 100), (int)(pos[2] * 100),
+                         (int)(sc[0] * 100), (int)(sc[1] * 100), (unsigned long)fl, (unsigned long)fl2,
+                         (unsigned long)tex->w, (unsigned long)tex->h, (unsigned long)tex->bw, (unsigned long)tex->bh,
+                         o[0x94], o[0x95], o[0x96], o[0x97], (int)(g_cur_xfov * 100));
+                }
+            }
+        }
         if (d < 1.0f && !(fl & 0x08)) continue;
         col = (uint32_t)o[0x94] | ((uint32_t)o[0x95] << 8) | ((uint32_t)o[0x96] << 16) | ((uint32_t)o[0x97] << 24);
         {
@@ -3112,7 +3165,6 @@ static int cmp_ptr(const void *a, const void *b)
  * d3d.ren reads +0x1FC and +0x1D4 where AVP2's reads +0x1F8 and +0x1D0).
  * Decided on the first model seen: the right slot points at a Model whose
  * first dword is a vtable inside the engine executable. */
-static uint32_t g_model_off;
 static int in_exe_image(uintptr_t v)
 {
     static uintptr_t lo, hi;
