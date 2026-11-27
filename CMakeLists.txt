@@ -16,6 +16,7 @@ add_link_options(-static-libgcc $<$<CONFIG:Release>:-s>)
 # avp2m_trace.ren: logging proxy renderer
 add_library(avp2m_trace SHARED
   src/trace/avp2m_trace.c
+  src/compat/game_fixes.c
   src/trace/thunks.S
   src/trace/avp2m_trace.def)
 set_target_properties(avp2m_trace PROPERTIES PREFIX "" SUFFIX ".ren")
@@ -24,6 +25,7 @@ target_link_libraries(avp2m_trace PRIVATE user32 kernel32)
 # avp2m_d3d11.ren: Direct3D 11 renderer (milestone 1: 2D + presentation)
 add_library(avp2m_d3d11 SHARED
   src/renderer/d3d11/avp2m_d3d11.c
+  src/compat/game_fixes.c
   src/renderer/d3d11/avp2m_d3d11.def)
 set_target_properties(avp2m_d3d11 PROPERTIES PREFIX "" SUFFIX ".ren")
 target_link_libraries(avp2m_d3d11 PRIVATE d3d11 dxgi dxguid user32 kernel32)

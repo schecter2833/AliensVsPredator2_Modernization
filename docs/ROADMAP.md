@@ -10,7 +10,9 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 - [x] Reverse-engineering setup guide: REA + Ghidra 12.2 ([RE-SETUP.md](RE-SETUP.md))
 - [ ] Shared symbol/type exports (names and types only, no decompiled code)
 - [x] Identify that Primal Hunt uses its own engine build (see FINDINGS.md)
-- [ ] Capture the Primal Hunt launcher's `avp2cmds.txt` (exact `-rez` list); retest the Zeta Site load crash
+- [x] Capture the Primal Hunt launcher's `avp2cmds.txt` (exact `-rez` list); retest the Zeta Site load crash
+- [x] Fix the Zeta Site load crash (bug in PH `object.lto`, fixed in memory by `src/compat/game_fixes.c`)
+- [ ] Run Primal Hunt with the D3D11 renderer
 - [ ] Diff the AVP2 vs Primal Hunt engine interfaces (function tables, struct sizes)
 
 ## Phase 1: Replacement renderer (`d3d.ren`)

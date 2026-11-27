@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include "../../compat/game_fixes.h"
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
@@ -3425,6 +3426,16 @@ static void __cdecl r_swap_buffers(uint32_t flags)
 {
     (void)flags;
     g_frame_no++;
+    {   /* fixes for original game-module bugs (src/compat/game_fixes.c); cvar avp2m_gamefixes 0 disables */
+        const char *fname; void *fwhere;
+        static int checked;
+        if (!checked) {
+            checked = 1;
+            if (cvar_int("avp2m_gamefixes", 1)) avp2m_start_game_fix_watcher();
+            else rlog("game fixes disabled (avp2m_gamefixes 0)");
+        }
+        if (avp2m_game_fix_news(&fname, &fwhere)) rlog("game fix applied at %p: %s", fwhere, fname);
+    }
     if (g_ctx && g_swap) present_frame();
 }
 

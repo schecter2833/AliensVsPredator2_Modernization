@@ -54,8 +54,36 @@ SwapBuffers(flags = 1)
 3. **No frame limiter.** Menus ran at about 2,000+ fps and gameplay at about 900 fps. A frame limiter, or a fix for the physics at high frame rates, belongs in the hook layer (Phase 2).
 4. **Windowed placement bug.** In windowed mode on a 2560×1080 display, the engine centers the window horizontally but places it at y≈929, mostly off-screen, and moves it back there every time it regains focus. A replacement renderer, or the hook layer, should own window placement.
 
-## Known issue: Primal Hunt crash on "Zeta Site" load (test setup)
+## Fixed: Primal Hunt crash on "Zeta Site" load
 
-- `object.lto` (PH) access violation at RVA `0xD5719` (VA `0x100D5719` at its preferred base), inside the function at RVA `0xD5620`.
-- That function looks up the current character's type ID (from `CCharacter` or `BodyProp`) and uses it to index a 0x7D8-byte-per-entry attribute table. The ID was `-251`, so the read went out of bounds.
-- **It reproduces identically with the stock `d3d.ren`**, so the trace renderer isn't the cause. The most likely cause is the hand-built `-rez` order or set (character attributes not loaded or overridden as the official launcher would). Next step: capture the `avp2cmds.txt` the PH launcher writes and retest with exactly that.
+**Not a test-setup problem.** The official launcher's command file (captured from
+`%LOCALAPPDATA%\VirtualStore\Program Files (x86)\Aliens versus Predator 2 - Primal Hunt\avp2cmds.txt`,
+since Windows redirects the launcher's write there) uses this order:
+
+```
+-rez <AVP2>\AVP2.rez -rez <AVP2>\sounds.rez -rez <AVP2>\Alien.rez -rez <AVP2>\Marine.rez
+-rez <AVP2>\Predator.rez -rez <AVP2>\Multi.rez -rez multi.rez -rez AVP2dll.rez -rez AVP2l.rez
+-rez dialogue.rez -rez avp2p.rez -rez avp2p1.rez -rez avp2x.rez -rez custom
++DisableMusic 0 +DisableSound 0 +EnableTripBuf 1 +DisableHardwareCursor 0 ++PerformanceConfig .DefaultLow
+```
+
+With exactly that order (`test-ph/run_official_order.bat`) Zeta Site still crashed the same way, with the
+stock renderer.
+
+**Cause:** a bug in Primal Hunt's `object.lto` (function at RVA `0xD5620`, a damage-effect update). It reads
+a flag from the character attribute table (entries of `0x7D8` bytes) using the object's character index.
+For objects that are neither `CCharacter` nor `BodyProp` that index is **-1**, so it reads `0x2B0` bytes
+*before* the table. The faulting instruction is `mov ecx, [eax + ecx*8 + 0x528]` with the index already
+multiplied by 251, hence `ECX = 0xFFFFFF05`. The table is a large allocation that starts 8 bytes into a
+page (`EAX = ...F008`); on current Windows the page in front of it isn't mapped, so the stray read faults.
+On the heap of the time there was readable memory there and the bug went unnoticed.
+
+**Fix:** `src/compat/game_fixes.c`, applied in memory by both of our renderer DLLs (files on disk stay
+stock, so multiplayer file checks are unaffected). A background watcher finds the loaded module by its
+exact original bytes and rewrites the 49 bytes at RVA `0xD56F3` to treat a negative index as "flag not
+set". Confirmed: with the trace renderer (stock rendering) the fix is logged as applied and Zeta Site loads
+and plays. Lessons from getting there: the watcher must not use Toolhelp snapshots (deadlocked during
+renderer Init), must not start before the first frame, and must check memory is readable before comparing
+bytes (a fault on its thread silently ends the process).
+
+Side note: the official launcher starts the real game fullscreen at 640×480, which works on this machine.

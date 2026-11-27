@@ -13,11 +13,12 @@
  */
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include "../compat/game_fixes.h"
 #include <stdint.h>
 
 #include "../renderer/render_struct.h"
 
-#define TRACE_VERSION      "0.1.4"
+#define TRACE_VERSION      "0.1.5"
 #define LOG_FIRST_CALLS    8      /* full lines for the first N calls per slot */
 #define SUMMARY_EVERY_MS   30000  /* ms between count summaries (menus run uncapped at 2000+ fps) */
 
@@ -96,6 +97,11 @@ static void tlog(const char *fmt, ...)
     log_open();
     log_raw(line);
     if (g_lock_ready) LeaveCriticalSection(&g_lock);
+}
+
+static void trace_fix_log(const char *name, void *where)
+{
+    tlog("game fix applied at %p: %s", where, name);
 }
 
 static void log_summary(const char *why)
@@ -219,6 +225,14 @@ void __cdecl avp2m_trace_enter(int idx, const uint32_t *args)
 
     if (idx == RS_RenderScene)
         probe_model_light();
+
+    /* fixes for original game-module bugs (see src/compat/game_fixes.c);
+       the watcher starts at the first frame, never during Init */
+    if (idx == RS_SwapBuffers) avp2m_start_game_fix_watcher();
+    {
+        const char *fname; void *fwhere;
+        if (avp2m_game_fix_news(&fname, &fwhere)) trace_fix_log(fname, fwhere);
+    }
 
     if (idx == RS_SwapBuffers) {
         LONG now = (LONG)GetTickCount();
