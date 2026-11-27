@@ -52,6 +52,8 @@ To undo: restore `autoexec.cfg` (or set `RENDERDLL` back to `d3d.ren`) and delet
 
 `thunks.S` holds 38 small assembly thunks. Each one saves all registers and flags, calls `avp2m_trace_enter(slot, args)`, restores everything, and jumps to the stock function, so the engine's stack is untouched. `Init` is wrapped in C so its result can be logged. The logging uses only Win32 calls and no floating point, so it can't disturb the engine's FPU or SSE state.
 
-## Research probe (v0.1.3)
+## Research probe (v0.1.3+)
 
 While the stock renderer runs behind the proxy, every 30th `RenderScene` the proxy logs the stock renderer's per-model lighting state (`modellight` lines: position, light add, color, global light, grid ambient, light count) for the last model it lit. This is how the D3D11 renderer's model lighting formula was measured. The offsets are specific to the AVP2 1.0.9.6 `d3d.ren`. If `d3d.ren` isn't next to the proxy, it also tries `stock_d3d.ren`.
+
+v0.1.4 also logs the stock renderer's particle size factor (`particle K`, image offset `0x55D8C`) and viewport width.

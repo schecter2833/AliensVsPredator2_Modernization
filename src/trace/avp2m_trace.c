@@ -17,7 +17,7 @@
 
 #include "../renderer/render_struct.h"
 
-#define TRACE_VERSION      "0.1.3"
+#define TRACE_VERSION      "0.1.4"
 #define LOG_FIRST_CALLS    8      /* full lines for the first N calls per slot */
 #define SUMMARY_EVERY_MS   30000  /* ms between count summaries (menus run uncapped at 2000+ fps) */
 
@@ -182,6 +182,14 @@ static void probe_model_light(void)
     tlog("           sun=%d,%d,%d dir=%d,%d,%d,%d grid=%d,%d,%d lights=%lu (x100)",
          C(0x868), C(0x86C), C(0x870), C(0x874), C(0x878), C(0x87C), C(0x880),
          C(0x884), C(0x888), C(0x88C), (unsigned long)*(const uint32_t *)(m + 0x2BC));
+    {   /* particle size factor: projected half size = size x (vp right - vp left) x K / z */
+        const uint8_t *b = (const uint8_t *)g_real;
+        if (safe_ptr(b + 0x55D14, 0x80)) {
+            float k = *(const float *)(b + 0x55D8C);
+            int vl = *(const int *)(b + 0x55D14), vr = *(const int *)(b + 0x55D1C);
+            tlog("           particle K=%d (x100000) viewport %d..%d", (int)(k * 100000.0f), vl, vr);
+        }
+    }
 #undef C
 }
 

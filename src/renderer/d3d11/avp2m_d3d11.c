@@ -1860,7 +1860,8 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
 #define SPR_ALPHA 2
 typedef struct SprDraw { RTexture *tex; int blend; float depth; UINT first; } SprDraw;
 static float g_spr_scale = 0.5f;        /* half size per texel per unit scale (tunable) */
-static float g_particle_scale = 1.0f;   /* particle half size per unit of particle size; cvar avp2m_psize x100 */
+static float g_particle_scale = 1.0f;   /* extra particle size multiplier; cvar avp2m_psize x100 */
+static float g_cur_xfov = 1.5708f;      /* horizontal FOV of the current scene (radians) */
 
 static int cmp_spr(const void *a, const void *b)
 {
@@ -1974,7 +1975,10 @@ static void draw_sprites(const float *campos, const float *cr, const float *cu, 
             xform34(om, pf + 9, p);                    /* +0x24 */
             d = (p[0] - campos[0]) * cf[0] + (p[1] - campos[1]) * cf[1] + (p[2] - campos[2]) * cf[2];
             if (d < 1.0f) continue;
-            hs = pf[7] * g_particle_scale;             /* +0x1C */
+            /* The stock renderer sizes particles in screen space: half size in pixels =
+             * size x viewport width x K / depth, with K = 1.0 (measured with the trace
+             * probe). In world units that is size x 2 x tan(xfov / 2). */
+            hs = pf[7] * 2.0f * (float)tan(g_cur_xfov * 0.5) * g_particle_scale;   /* +0x1C */
             if (!(hs > 0)) continue;
             cr8 = (uint32_t)(fminf(fmaxf(pf[3] * o[0x94] / 255.0f, 0), 255));
             cg8 = (uint32_t)(fminf(fmaxf(pf[4] * o[0x95] / 255.0f, 0), 255));
@@ -2192,6 +2196,7 @@ static void render_world(const uint8_t *sd)
     farz = *(const float *)(sd + SD_FARZ);
     if (!(farz > 10.0f && farz < 1e7f)) farz = 10000.0f;
     if (!(xfov > 0.05f && xfov < 3.1f)) xfov = 1.5708f;
+    g_cur_xfov = xfov;
     if (!(yfov > 0.05f && yfov < 3.1f)) yfov = 1.1781f;
     if (logged < 3) {
         rlog("scene: pos %d,%d,%d rot %d,%d,%d,%d (x1000) fov %d,%d (mrad) far %d rect %ld,%ld,%ld,%ld",

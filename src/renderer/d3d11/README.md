@@ -16,7 +16,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 **3D so far:**
 - Camera from the engine's scene description (position, quaternion, FOV, viewport)
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
-- Particles (smoke, sparks, blood) from the engine's particle lists, as camera-facing quads. Experimental: their on-screen size hasn't been checked against the original yet.
+- Particles (smoke, sparks, blood) from the engine's particle lists, as camera-facing quads. Sized with the original formula (measured from the stock renderer), but not yet compared side by side on screen.
 - Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
 - World models (doors, lifts, rotating parts) follow their current transform.
 - The sky: the level's sky geometry is drawn from its own sky camera behind everything else.
@@ -47,7 +47,7 @@ Console variables:
 | `avp2m_hdr` | 0 | HDR scene rendering: 1 = ACES filmic tone mapping, 2 = Reinhard. The 3D scene renders into a 16-bit float target and is tone mapped before the HUD is drawn, so the HUD is unaffected. Read live. |
 | `avp2m_exposure` | 100 | HDR exposure in percent. Read live. |
 | `avp2m_modelsat` | 200 | Model color multiplier in percent (the original uses 2×). Read live. |
-| `avp2m_psize` | 100 | Particle size in percent (the size-to-world scale is still being calibrated). Read live. |
+| `avp2m_psize` | 100 | Extra particle size multiplier in percent, on top of the original's sizing. Read live. |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
 It writes `avp2m_d3d11.log` next to the DLL.
