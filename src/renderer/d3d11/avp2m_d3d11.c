@@ -20,6 +20,7 @@
 #include <stdint.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <stddef.h>
 #include <string.h>
 #include <math.h>
 
@@ -142,6 +143,8 @@ typedef struct RenderContext {
 } RenderContext;
 static RenderContext *g_cur_ctx;
 static float g_lmscale = 1.0f;       /* cvar avp2m_lmscale x100 */
+static float g_model_floor = 0.40f;     /* stopgap ambient floor for models */
+static float g_model_gridscale = 4.0f;  /* stopgap boost for the dark light grid */
 static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vertex colour only */
 static ID3D11VertexShader *g_vs3d;
 static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
@@ -1454,16 +1457,128 @@ static void object_matrix(const uint8_t *o, const float *campos, const float *cr
     }
 }
 
+/* World light grid (world+0xFC): ambient light for objects.
+ *   +0x00 cells (u32 0x00RRGGBB), +0x08 y stride, +0x20 z stride (in cells),
+ *   +0x14/+0x18/+0x1C max cell index x/y/z, +0x30 1/cell size (3 floats),
+ *   +0x3C grid minimum (3 floats). Sampled trilinearly. */
+static int lightgrid_sample(const uint8_t *world, const float *pos, float *rgb)
+{
+    const uint8_t *g, *cells;
+    int32_t mx, my, mz, sy, sz, ix[3], k;
+    float f[3];
+    if (!world || !readable(world + 0xFC, 0x48)) return 0;
+    g = world + 0xFC;
+    cells = RDPTR(g, 0);
+    sy = (int32_t)RD32(g, 0x08); sz = (int32_t)RD32(g, 0x20);
+    mx = (int32_t)RD32(g, 0x14); my = (int32_t)RD32(g, 0x18); mz = (int32_t)RD32(g, 0x1C);
+    if (!cells || mx < 0 || my < 0 || mz < 0 || mx > 4096 || my > 4096 || mz > 4096 || sy <= 0 || sz <= 0) return 0;
+    for (k = 0; k < 3; k++) {
+        float t = (pos[k] - ((const float *)(g + 0x3C))[k]) * ((const float *)(g + 0x30))[k];
+        int32_t lim = k == 0 ? mx : k == 1 ? my : mz;
+        int32_t i = (int32_t)floorf(t);
+        if (i < 0) { i = 0; t = 0; }
+        if (i >= lim) { i = lim; t = (float)lim; }
+        ix[k] = i;
+        f[k] = t - (float)i;
+    }
+    if (!readable(cells, ((size_t)mx + 1 + (size_t)my * sy + (size_t)mz * sz + 1) * 4)) return 0;
+    rgb[0] = rgb[1] = rgb[2] = 0;
+    for (k = 0; k < 8; k++) {
+        int dx = k & 1, dy = (k >> 1) & 1, dz = (k >> 2) & 1;
+        int32_t x = ix[0] + dx, y = ix[1] + dy, z = ix[2] + dz;
+        float w = (dx ? f[0] : 1 - f[0]) * (dy ? f[1] : 1 - f[1]) * (dz ? f[2] : 1 - f[2]);
+        uint32_t c;
+        if (x > mx) x = mx;
+        if (y > my) y = my;
+        if (z > mz) z = mz;
+        c = RD32(cells, ((size_t)x + (size_t)y * sy + (size_t)z * sz) * 4);
+        rgb[0] += w * (float)((c >> 16) & 0xFF);
+        rgb[1] += w * (float)((c >> 8) & 0xFF);
+        rgb[2] += w * (float)(c & 0xFF);
+    }
+    return 1;
+}
+
+/* Point lights affecting a model: static lights from the world tree (box
+ * query, list 1) and dynamic light objects (type 4) from this frame's list. */
+#define MAX_MODEL_LIGHTS 8
+typedef struct MLight { float pos[3], radius, col[3]; } MLight;
+static MLight g_mlights[MAX_MODEL_LIGHTS];
+static int g_nmlights;
+static float g_mlight_center[3], g_mlight_reach;
+
+typedef struct BoxQuery {
+    uint32_t engine;                      /* engine writes the tree pointer */
+    uint32_t list_index;                  /* 1 = static lights */
+    float min[3], max[3];
+    uint32_t pad[3];                      /* callback must sit at +0x2C, user at +0x30 */
+    void (__cdecl *on_object)(const uint8_t *light, void *user);
+    void *user;
+    uint32_t scratch[8];
+} BoxQuery;
+typedef char box_query_layout_check[(offsetof(BoxQuery, on_object) == 0x2C && offsetof(BoxQuery, user) == 0x30) ? 1 : -1];
+typedef void (__fastcall *PFN_WorldTreeBox)(void *self, void *edx, BoxQuery *q);
+
+static void add_mlight(const float *pos, float radius, float r, float g, float b)
+{
+    float d[3], dist;
+    int k;
+    if (g_nmlights >= MAX_MODEL_LIGHTS || !(radius > 0)) return;
+    for (k = 0; k < 3; k++) d[k] = pos[k] - g_mlight_center[k];
+    dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    if (dist - g_mlight_reach >= radius) return;
+    memcpy(g_mlights[g_nmlights].pos, pos, 12);
+    g_mlights[g_nmlights].radius = radius;
+    g_mlights[g_nmlights].col[0] = r / 255.0f;
+    g_mlights[g_nmlights].col[1] = g / 255.0f;
+    g_mlights[g_nmlights].col[2] = b / 255.0f;
+    g_nmlights++;
+}
+
+/* Static light: +0x68 position, +0x74 radius, +0x78 color (3 floats, 0..255). */
+static void __cdecl on_static_light(const uint8_t *l, void *user)
+{
+    const float *f;
+    (void)user;
+    if (!readable(l, 0xA0)) return;
+    f = (const float *)(l + 0x68);
+    add_mlight(f, f[3], f[4], f[5], f[6]);
+}
+
+static void gather_model_lights(const uint8_t *world, const float *center, float reach)
+{
+    uint32_t i;
+    g_nmlights = 0;
+    memcpy(g_mlight_center, center, 12);
+    g_mlight_reach = reach;
+    if (world && readable(world, 0x70) && readable(RDPTR(world + 0x6C, 0), 0x10)) {
+        BoxQuery q;
+        int k;
+        memset(&q, 0, sizeof q);
+        q.list_index = 1;
+        for (k = 0; k < 3; k++) { q.min[k] = center[k] - reach; q.max[k] = center[k] + reach; }
+        q.on_object = on_static_light;
+        ((PFN_WorldTreeBox)(void *)(uintptr_t)RD32(RDPTR(world + 0x6C, 0), 0x08))((void *)(world + 0x6C), NULL, &q);
+    }
+    for (i = 0; i < g_nvis_objs; i++) {
+        const uint8_t *o = g_vis_objs[i];
+        if (o[OBJ_TYPE] != 4 || !readable(o, 0x1B4)) continue;
+        add_mlight((const float *)(o + OBJ_POS), *(const float *)(o + 0x1B0), o[0x94], o[0x95], o[0x96]);
+    }
+}
+
+static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
 static void draw_models(const float *campos, const float *cr, const float *cu, const float *cf)
 {
+    const uint8_t *world = g_cur_ctx ? (const uint8_t *)g_cur_ctx->world : NULL;
     static MdlDraw list[1024];
     static float skinned[4096 * 3];
     static uint32_t light[4096];
     D3D11_MAPPED_SUBRESOURCE mv, mc;
     WVertex *vv;
-    uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0;
-    static int logged;
-    float bf[4] = { 0, 0, 0, 0 };
+    uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0, k;
+    static int logged, glog, mlog;
+    float bf[4] = { 0, 0, 0, 0 }, mamb[3] = { 1, 1, 1 };
 
     if (!g_mdl_vb) return;
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_mdl_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mv))) return;
@@ -1491,6 +1606,31 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
         if (!readable(nodes, nnodes * 64)) continue;
         object_matrix(o, campos, cr, cu, cf, om);
         nmodels++;
+        {   /* ambient from the world light grid at the model, tinted by the object color */
+            float amb[3] = { 160, 160, 160 };
+            const float *lp = (RD32(o, OBJ_FLAGS) & 0x40) ? campos : (const float *)(o + OBJ_POS);
+            if (world) {
+                int ok = lightgrid_sample(world, lp, amb);
+                if (mlog < 12 && (lp[0] != 0 || lp[1] != 0 || lp[2] != 0))
+                    rlog("  model %p at %d,%d,%d: light grid %s %d,%d,%d", (void *)o, (int)lp[0], (int)lp[1], (int)lp[2],
+                         ok ? "ok" : "unavailable", (int)amb[0], (int)amb[1], (int)amb[2]);
+                if (glog < 1 && nmodels == 1) {
+                    const uint8_t *g = world + 0xFC;
+                    rlog_dump("  lightgrid", g, 0x48);
+                }
+            }
+            /* The raw grid is very dark (0..20 of 255 in "Unwelcome Guests"); the stock renderer
+             * brightens it through per-channel tables not mapped yet. Until then, keep a floor so
+             * models stay readable and let the grid and point lights add on top. */
+            for (k = 0; k < 3; k++)
+                mamb[k] = (g_model_floor + amb[k] / 255.0f * g_model_gridscale) * (float)o[0x94 + k] / 255.0f;
+            gather_model_lights(world, lp, readable(m, 0xAC) && *(const float *)(m + 0xA8) > 0 ?
+                                *(const float *)(m + 0xA8) : 64.0f);
+            if (mlog < 12 && (lp[0] != 0 || lp[1] != 0 || lp[2] != 0)) {
+                rlog("    %d lights%s", g_nmlights, (RD32(o, OBJ_FLAGS) & 0x40) ? " (camera-space model)" : "");
+                mlog++;
+            }
+        }
         for (pi = 0; pi < npieces; pi++) {
             const uint8_t *pc = RDPTR(pieces, pi * 4), *verts, *tris;
             uint32_t nverts, ntris, vi, ti, skin;
@@ -1524,11 +1664,27 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                 xform34(om, acc, wp);
                 memcpy(skinned + vi * 3, wp, sizeof wp);
                 rot33(om, nrm, n2);
-                {   /* simple light until the world light grid is mapped */
+                {   /* light grid ambient (gentle top-down term) plus point lights */
                     float len = sqrtf(n2[0] * n2[0] + n2[1] * n2[1] + n2[2] * n2[2]) + 1e-6f;
-                    float l = 0.45f + 0.35f * ((n2[1] / len) * 0.8f + 0.2f);
-                    uint32_t c = (uint32_t)((l < 0 ? 0 : l > 1 ? 1 : l) * 255.0f);
-                    light[vi] = c | (c << 8) | (c << 16);
+                    float sh = 0.8f + 0.3f * (n2[1] / len), pl[3] = { 0, 0, 0 };
+                    uint32_t ch[3];
+                    int li;
+                    for (li = 0; li < g_nmlights; li++) {
+                        const MLight *L = &g_mlights[li];
+                        float d[3] = { L->pos[0] - wp[0], L->pos[1] - wp[1], L->pos[2] - wp[2] };
+                        float dist = sqrtf(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]) + 1e-6f;
+                        float ndl = (d[0] * n2[0] + d[1] * n2[1] + d[2] * n2[2]) / (dist * len);
+                        float att = 1.0f - dist / L->radius;
+                        if (att <= 0 || ndl <= 0) continue;
+                        pl[0] += L->col[0] * ndl * att;
+                        pl[1] += L->col[1] * ndl * att;
+                        pl[2] += L->col[2] * ndl * att;
+                    }
+                    for (k = 0; k < 3; k++) {
+                        float l = (mamb[k] * sh + pl[k] * (float)o[0x94 + k] / 255.0f) * g_lmscale;
+                        ch[k] = (uint32_t)((l < 0 ? 0 : l > 1 ? 1 : l) * 255.0f);
+                    }
+                    light[vi] = ch[0] | (ch[1] << 8) | (ch[2] << 16);
                 }
             }
             list[nd].tex = tex;
@@ -1556,6 +1712,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_vb, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_cvb, 0);
     if (logged < 2) { rlog("models: %lu drawn, %lu pieces, %lu vertices", (unsigned long)nmodels, (unsigned long)nd, (unsigned long)nv_out); logged++; }
+    if (world && nmodels && glog < 1) glog++;
     if (!nd) return;
     {
         ID3D11Buffer *vbs[2] = { g_mdl_vb, g_mdl_cvb };

@@ -219,6 +219,12 @@ The same object can be reported by several nodes, so deduplicate. "Unwelcome Gue
 
 The object matrix comes from position `+0x194`, rotation `+0x9C` and scale `+0xAC`; objects flagged `0x40` ("really close", the first-person weapon and arms) are in camera space.
 
+**Model lighting** (partly mapped):
+
+- **Light grid** at `world+0xFC`: `+0x00` cells (u32 `0x00RRGGBB`), `+0x08` y stride, `+0x20` z stride (in cells; x stride is 1), `+0x14`/`+0x18`/`+0x1C` max cell index x/y/z, `+0x24` cell size (3 floats; 2000 in "Unwelcome Guests"), `+0x30` 1/cell size, `+0x3C` grid minimum. The stock renderer samples it trilinearly at the model's position. The raw values are very dark (0–20 of 255 at the level start); the stock renderer then remaps each channel through tables at `0x1005A004` / `0x1005A104` / `0x1005A204` (not mapped yet).
+- **Static lights:** world tree vtable slot 2 (`+0x08`, thiscall) is a box query: `+0x04` list index (1 = static lights), `+0x08` min, `+0x14` max, `+0x2C` `void cb(light, user)`, `+0x30` user. Light: `+0x68` position, `+0x74` radius, `+0x78` color (3 floats, 0–255), `+0x84` direction, `+0x90` cone cosine, `+0x94` outer color.
+- **Dynamic lights:** light objects (type 4): position `+0x194`, radius `+0x1B0`, color bytes `+0x94`–`+0x96`.
+
 **Menus** (draw mode 2) draw only the SceneDesc object list (`+0xF4` / `+0xF8`): the main menu's starfield and planets are sprites, plus one model.
 
 **SceneDesc** (argument of RenderScene):
@@ -257,5 +263,6 @@ The camera uses LithTech's left-handed, Y-up, Z-forward convention. The quaterni
 - [x] Sprites (billboards and rotatable), in game and in the menu background
 - [x] Step 4: world models (doors, lifts, rotating parts) drawn with their current transform
 - [x] Step 5a: models (characters, first-person weapon and arms), skinned on the CPU from the engine's node transforms
-- [ ] Model lighting (world light grid, dynamic lights), LODs, translucent models, attachments; particles; sky
+- [~] Model lighting: light grid, static and dynamic point lights are wired up; brightness uses a stopgap floor until the stock per-channel tables are mapped
+- [ ] LODs, translucent models, attachments; particles; sky
 - [ ] Video playback (DirectDraw hook emulation or a separate Bink path)
