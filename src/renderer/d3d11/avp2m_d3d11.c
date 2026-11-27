@@ -1615,6 +1615,38 @@ static void gather_model_lights(const uint8_t *world, const float *center, float
 }
 
 static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
+
+/* The game code's model hook (SceneDesc +0xFC, user data +0x100), called per
+ * model as the stock renderer does. It may change the model's light add and
+ * color; the game uses it for things like vision modes and highlights. */
+typedef struct ModelHookData {
+    void *object;
+    uint32_t hook_flags;          /* the stock renderer passes 1 */
+    uint32_t object_flags;        /* object +0x88 */
+    float *light_add;             /* 3 floats, 0..255; starts at SceneDesc +0x1C */
+    float *object_color;          /* 3 floats, 0..255; starts at the object's color */
+} ModelHookData;
+typedef void (__cdecl *PFN_ModelHook)(ModelHookData *data, void *user);
+static const uint8_t *g_cur_sd;
+
+static void run_model_hook(uint8_t *o, float *add, float *col)
+{
+    int k;
+    for (k = 0; k < 3; k++) {
+        add[k] = (g_cur_sd && readable(g_cur_sd, 0x104)) ? ((const float *)(g_cur_sd + 0x1C))[k] : 0.0f;
+        col[k] = (float)o[0x94 + k];
+    }
+    if (g_cur_sd && readable(g_cur_sd, 0x104) && RD32(g_cur_sd, 0xFC)) {
+        ModelHookData hd;
+        hd.object = o;
+        hd.hook_flags = 1;
+        hd.object_flags = RD32(o, OBJ_FLAGS);
+        hd.light_add = add;
+        hd.object_color = col;
+        ((PFN_ModelHook)(void *)(uintptr_t)RD32(g_cur_sd, 0xFC))(&hd, (void *)(uintptr_t)RD32(g_cur_sd, 0x100));
+    }
+}
+
 static void draw_models(const float *campos, const float *cr, const float *cu, const float *cf)
 {
     const uint8_t *world = g_cur_ctx ? (const uint8_t *)g_cur_ctx->world : NULL;
@@ -1625,7 +1657,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
     WVertex *vv;
     uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0, k;
     static int logged, glog, mlog;
-    float bf[4] = { 0, 0, 0, 0 }, mamb[3] = { 1, 1, 1 };
+    float bf[4] = { 0, 0, 0, 0 }, mamb[3] = { 1, 1, 1 }, mcol[3] = { 1, 1, 1 };
 
     if (!g_mdl_vb) return;
     if (FAILED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_mdl_vb, 0, D3D11_MAP_WRITE_DISCARD, 0, &mv))) return;
@@ -1669,8 +1701,18 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
             /* The raw grid is very dark (0..20 of 255 in "Unwelcome Guests"); the stock renderer
              * brightens it through per-channel tables not mapped yet. Until then, keep a floor so
              * models stay readable and let the grid and point lights add on top. */
-            for (k = 0; k < 3; k++)
-                mamb[k] = (g_model_floor + amb[k] / 255.0f * g_model_gridscale) * (float)o[0x94 + k] / 255.0f;
+            {
+                float hadd[3], hcol[3];
+                run_model_hook(o, hadd, hcol);
+                if (mlog < 12 && (lp[0] != 0 || lp[1] != 0 || lp[2] != 0))
+                    rlog("    hook: light add %d,%d,%d color %d,%d,%d", (int)hadd[0], (int)hadd[1], (int)hadd[2],
+                         (int)hcol[0], (int)hcol[1], (int)hcol[2]);
+                for (k = 0; k < 3; k++) {
+                    float c = hcol[k] / 255.0f;
+                    mcol[k] = c < 0 ? 0 : c;
+                    mamb[k] = (g_model_floor + amb[k] / 255.0f * g_model_gridscale + hadd[k] / 255.0f) * mcol[k];
+                }
+            }
             gather_model_lights(world, lp, readable(m, 0xAC) && *(const float *)(m + 0xA8) > 0 ?
                                 *(const float *)(m + 0xA8) : 64.0f);
             if (mlog < 12 && (lp[0] != 0 || lp[1] != 0 || lp[2] != 0)) {
@@ -1728,7 +1770,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                         pl[2] += L->col[2] * ndl * att;
                     }
                     for (k = 0; k < 3; k++) {
-                        float l = (mamb[k] * sh + pl[k] * (float)o[0x94 + k] / 255.0f) * g_lmscale;
+                        float l = (mamb[k] * sh + pl[k] * mcol[k]) * g_lmscale;
                         ch[k] = (uint32_t)((l < 0 ? 0 : l > 1 ? 1 : l) * 255.0f);
                     }
                     light[vi] = ch[0] | (ch[1] << 8) | (ch[2] << 16);
@@ -2454,6 +2496,7 @@ static void dump_scene(const uint8_t *sd)
 static int __cdecl r_render_scene(void *scene)
 {
     const uint8_t *sd = (const uint8_t *)scene;
+    g_cur_sd = sd;
     dump_scene(sd);
     g_nvis_objs = 0;
     if (g_ctx && readable(sd, 0x100) && RD32(sd, 0) == 1 && g_cur_ctx && RDPTR(sd, 0x34) == (const uint8_t *)g_cur_ctx) {
