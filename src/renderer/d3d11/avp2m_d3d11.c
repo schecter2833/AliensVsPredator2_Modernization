@@ -179,7 +179,7 @@ static ID3D11Buffer *g_spr_vb, *g_spr_cvb;
 #define MAX_MODEL_VERTS (3 * 120000)
 static ID3D11Buffer *g_mdl_vb, *g_mdl_cvb;
 static ID3D11InputLayout  *g_layout3d;
-static ID3D11Buffer       *g_cb3d;
+static ID3D11Buffer       *g_cb3d, *g_cbdl;
 static ID3D11Texture2D    *g_depth_tex;
 static ID3D11DepthStencilView *g_dsv;
 static ID3D11DepthStencilState *g_ds_on, *g_ds_off;
@@ -218,14 +218,21 @@ static const char k_hlsl3d[] =
     "Texture2D t : register(t0); Texture2D lm : register(t1);\n"
     "SamplerState s : register(s0); SamplerState sl : register(s1);\n"
     "struct VI { float3 p : POSITION; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
-    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; };\n"
+    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD0; float2 luv : TEXCOORD1; float4 c : COLOR; float3 wp : TEXCOORD2; };\n"
     "cbuffer W : register(b1) { float4 w0, w1, w2; };\n"
+    "cbuffer D : register(b2) { float4 dlc; float4 dlp[16]; float4 dlcol[16]; };\n"
+    "float3 dyn(float3 wp) { float3 l = 0; int n = (int)dlc.x; if (n <= 0) return l;\n"
+    "  float3 nn = normalize(cross(ddx(wp), ddy(wp)));\n"
+    "  for (int k = 0; k < n; k++) { float3 d = dlp[k].xyz - wp; float dist = length(d) + 1e-4;\n"
+    "    float att = saturate(1 - dist / dlp[k].w); float ndl = saturate(dot(nn, d / dist));\n"
+    "    l += dlcol[k].rgb * att * ndl; }\n"
+    "  return l * dlc.y; }\n"
     "VO vs(VI i) { VO o; float4 p = float4(i.p, 1);\n"
     "  float3 wp = float3(dot(w0, p), dot(w1, p), dot(w2, p));\n"
-    "  o.p = mul(float4(wp, 1), vp); o.uv = i.uv; o.luv = i.luv; o.c = i.c; return o; }\n"
+    "  o.p = mul(float4(wp, 1), vp); o.uv = i.uv; o.luv = i.luv; o.c = i.c; o.wp = wp; return o; }\n"
     "float4 ps(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); clip(c.a - 0.5);\n"
     "  float3 lmc = lm.Sample(sl, i.luv).rgb * lmscale.x * i.c.a;\n"
-    "  float3 l = i.c.a > 0.5 ? lmc : i.c.rgb;\n"
+    "  float3 l = (i.c.a > 0.5 ? lmc : i.c.rgb) + dyn(i.wp);\n"
     "  if (lmscale.y > 3.5) return float4(lerp(dot(c.rgb, 0.33).xxx, i.c.a > 0.5 ? float3(1,0.2,0.2) : float3(0.2,1,0.2), 0.5), 1);\n"
     "  if (lmscale.y > 2.5) return float4(lmc, 1);\n"
     "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
@@ -380,6 +387,8 @@ static int create_objects(void)
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
     bd.ByteWidth = 48;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbw))) return 0;
+    bd.ByteWidth = 16 + 32 * 16;     /* dynamic lights: count/scale, 16 positions+radius, 16 colours */
+    if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbdl))) return 0;
     bd.ByteWidth = 16;
     ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb_tm);
     memset(&bd, 0, sizeof bd);
@@ -600,6 +609,7 @@ static void release_device(void)
     SAFE_RELEASE(g_ds_on, ID3D11DepthStencilState);
     SAFE_RELEASE(g_ds_off, ID3D11DepthStencilState);
     SAFE_RELEASE(g_cb3d, ID3D11Buffer);
+    SAFE_RELEASE(g_cbdl, ID3D11Buffer);
     SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
     SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
     SAFE_RELEASE(g_ps_spr, ID3D11PixelShader);
@@ -862,6 +872,13 @@ static RTexture *create_texture(void *shared)
     }
     w = RD32(td, 0xCC);
     h = RD32(td, 0xD0);
+    {   /* format histogram (diagnostics) */
+        static uint32_t nfmt[8], ntot;
+        nfmt[fmt & 7]++;
+        if ((++ntot % 200) == 0)
+            rlog("textures: %lu created: 32-bit %lu, DXT1 %lu, DXT3 %lu, DXT5 %lu", (unsigned long)ntot,
+                 (unsigned long)nfmt[3], (unsigned long)nfmt[4], (unsigned long)nfmt[5], (unsigned long)nfmt[6]);
+    }
     if (nmips < 1 || nmips > 16 || w < 1 || h < 1 || w > 4096 || h > 4096) {
         static int w2;
         if (w2++ < 5) rlog("texture %p: bad header nmips=%lu w=%lu h=%lu fmt=%lu", shared,
@@ -983,6 +1000,7 @@ static void cross3(const float *a, const float *b, float *o)
     o[2] = a[0] * b[1] - a[1] * b[0];
 }
 
+static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
 static int lm_decode(const uint8_t *src, uint32_t size, uint32_t *dst, uint32_t count)
 {
     const uint8_t *end = src + size;
@@ -1076,7 +1094,7 @@ static int lm_gather(const uint8_t *world, const uint8_t *poly, uint32_t w, uint
 }
 
 /* Gouraud polys: a light animation entry with no lightmap carries per-vertex
- * colours as three byte arrays (entry+8/+12/+16 = B/G/R, entry+20 = count).
+ * colours as three byte arrays (entry+8/+12/+16 = R/G/B, entry+20 = count).
  * Output is R8G8B8A8 (alpha 0 = not lightmapped). */
 static int lm_vertex_colors(const uint8_t *world, const uint8_t *poly, uint32_t nv, uint32_t *out)
 {
@@ -1114,7 +1132,7 @@ static int lm_vertex_colors(const uint8_t *world, const uint8_t *poly, uint32_t 
     for (k = 0; k < nv; k++) {
         uint32_t c0 = acc[k][0] > 255 ? 255 : acc[k][0], c1 = acc[k][1] > 255 ? 255 : acc[k][1];
         uint32_t c2 = acc[k][2] > 255 ? 255 : acc[k][2];
-        out[k] = c2 | (c1 << 8) | (c0 << 16);   /* arrays are B, G, R */
+        out[k] = c0 | (c1 << 8) | (c2 << 16);   /* arrays are R, G, B */
     }
     return 1;
 }
@@ -1192,6 +1210,23 @@ static void lm_upload(RenderContext *rc, LMBuild *lb)
         if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, &init, &rc->lmpages[i].tex)))
             ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)rc->lmpages[i].tex, NULL,
                                                   &rc->lmpages[i].srv);
+    }
+    if (cvar_int("avp2m_lmdump", 0) && lb->pix[0]) {   /* write atlas page 0 as a BMP (diagnostics) */
+        FILE *f = fopen("avp2m_lmpage0.bmp", "wb");
+        if (f) {
+            uint8_t hdr[54];
+            uint32_t sz = LM_PAGE * LM_PAGE * 4;
+            int32_t hh = -LM_PAGE;
+            memset(hdr, 0, sizeof hdr);
+            hdr[0] = 'B'; hdr[1] = 'M';
+            *(uint32_t *)(hdr + 2) = 54 + sz; *(uint32_t *)(hdr + 10) = 54; *(uint32_t *)(hdr + 14) = 40;
+            *(int32_t *)(hdr + 18) = LM_PAGE; memcpy(hdr + 22, &hh, 4);
+            *(uint16_t *)(hdr + 26) = 1; *(uint16_t *)(hdr + 28) = 32; *(uint32_t *)(hdr + 34) = sz;
+            fwrite(hdr, 1, 54, f);
+            fwrite(lb->pix[0], 1, sz, f);
+            fclose(f);
+            rlog("lightmap atlas page 0 written to avp2m_lmpage0.bmp");
+        }
     }
     for (i = 0; i < lb->npages; i++) free(lb->pix[i]);
     free(lb->pix);
@@ -1413,6 +1448,28 @@ static void build_world(RenderContext *rc)
     }
     free(tris);
     lm_upload(rc, &lb);
+    {   /* light animations: list them (kind +0x20: 0 baked frames, else shadow-mask light) */
+        const uint8_t *anims = RDPTR(world, 0x08);
+        uint32_t na = RD32(world, 0x0C), ai, nk = 0;
+        static int alog;
+        if (alog++ < 1 && readable(anims, (UINT_PTR)na * 0x60)) {
+            for (ai = 0; ai < na; ai++) {
+                const uint8_t *an = anims + ai * 0x60;
+                if (RD32(an, 0x20) == 0 && ai > 3) continue;
+                if (nk++ >= 24) break;
+                {
+                    char nm[32];
+                    const char *src = readable(RDPTR(an, 0), 32) ? (const char *)RDPTR(an, 0) : (const char *)an;
+                    int c;
+                    for (c = 0; c < 31 && src[c] >= 0x20 && src[c] < 0x7F; c++) nm[c] = src[c];
+                    nm[c] = 0;
+                    rlog("lightanim %lu: %s kind %08lx", (unsigned long)ai, nm, (unsigned long)RD32(an, 0x20));
+                }
+                rlog_dump("  la", an, 0x60);
+            }
+            rlog("lightanims: %lu total", (unsigned long)na);
+        }
+    }
     rlog("world: %lu lightmapped polygons on %d atlas pages (%lu without lightmap data), lmscale %d%%, mean texel %d",
          (unsigned long)lit, rc->nlmpages, (unsigned long)lmfail, (int)(g_lmscale * 100),
          lit ? (int)(lmsum / lit) : -1);
@@ -1628,7 +1685,6 @@ static void gather_model_lights(const uint8_t *world, const float *center, float
     }
 }
 
-static void rlog_dump(const char *tag, const void *p, UINT_PTR n);
 
 /* The game code's model hook (SceneDesc +0xFC, user data +0x100), called per
  * model as the stock renderer does. It may change the model's light add and
@@ -2467,6 +2523,68 @@ static int mark_sky_bsps(RenderContext *rc, const uint8_t *sd, const float *camp
     return (int)found;
 }
 
+/* Dynamic lights on level surfaces: visible light objects (type 4) go to the
+ * world shader (b2), nearest first, at most 16. Light = colour / 255 x
+ * (1 - distance / radius) x N.L with the face normal; models get the same
+ * lights on the CPU (gather_model_lights). count 0 turns them off (sky pass,
+ * models). */
+#define MAX_DLIGHTS 16
+static float g_dl_scale = 1.0f;   /* cvar avp2m_dlscale x100 */
+static void write_dlights(const float *campos, int enable)
+{
+    D3D11_MAPPED_SUBRESOURCE map;
+    float buf[4 + 8 * MAX_DLIGHTS];
+    float dd[MAX_DLIGHTS];
+    uint32_t i, n = 0;
+    static int dlog;
+    if (!g_cbdl) return;
+    memset(buf, 0, sizeof buf);
+    if (enable && g_dl_scale > 0) {
+        for (i = 0; i < g_nvis_objs; i++) {
+            const uint8_t *o = g_vis_objs[i];
+            const float *p;
+            float rad, d2;
+            uint32_t j, slot;
+            if (o[OBJ_TYPE] != 4 || !readable(o, 0x1B4)) continue;
+            p = (const float *)(o + OBJ_POS);
+            rad = *(const float *)(o + 0x1B0);
+            if (!(rad > 0) || (o[0x94] | o[0x95] | o[0x96]) == 0) continue;
+            d2 = (p[0] - campos[0]) * (p[0] - campos[0]) + (p[1] - campos[1]) * (p[1] - campos[1]) + (p[2] - campos[2]) * (p[2] - campos[2]);
+            if (n < MAX_DLIGHTS) slot = n++;
+            else {   /* replace the farthest if this one is nearer */
+                slot = 0;
+                for (j = 1; j < n; j++) if (dd[j] > dd[slot]) slot = j;
+                if (dd[slot] <= d2) continue;
+            }
+            dd[slot] = d2;
+            buf[4 + slot * 4 + 0] = p[0]; buf[4 + slot * 4 + 1] = p[1]; buf[4 + slot * 4 + 2] = p[2];
+            buf[4 + slot * 4 + 3] = rad;
+            buf[4 + 4 * MAX_DLIGHTS + slot * 4 + 0] = o[0x94] / 255.0f;
+            buf[4 + 4 * MAX_DLIGHTS + slot * 4 + 1] = o[0x95] / 255.0f;
+            buf[4 + 4 * MAX_DLIGHTS + slot * 4 + 2] = o[0x96] / 255.0f;
+            {   /* log each light object once */
+                static const uint8_t *seen[128];
+                static uint32_t nseen;
+                uint32_t q;
+                for (q = 0; q < nseen && seen[q] != o; q++) ;
+                if (q == nseen && nseen < 128) seen[nseen++] = o; else q = 0xFFFFFFFFu;
+                if (q != 0xFFFFFFFFu && dlog < 100) dlog++; else goto logged_dl;
+            }
+            {
+                rlog("dlight %p at %d,%d,%d radius %d color %d,%d,%d flags %08lx", (const void *)o, (int)p[0], (int)p[1], (int)p[2],
+                     (int)rad, o[0x94], o[0x95], o[0x96], (unsigned long)RD32(o, OBJ_FLAGS));
+            }
+logged_dl:;
+        }
+    }
+    buf[0] = (float)n;
+    buf[1] = g_dl_scale;
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cbdl, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+        memcpy(map.pData, buf, sizeof buf);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cbdl, 0);
+    }
+}
+
 static void render_world(const uint8_t *sd)
 {
     RenderContext *rc;
@@ -2519,6 +2637,7 @@ static void render_world(const uint8_t *sd)
             g_lmdebug = cvar_int("avp2m_lmdebug", 0);
             g_hdr = cvar_int("avp2m_hdr", 0);
             g_particle_scale = (float)cvar_int("avp2m_psize", 100) / 100.0f;
+            g_dl_scale = (float)cvar_int("avp2m_dlscale", 100) / 100.0f;
             if (!(g_particle_scale > 0.01f && g_particle_scale < 100.0f)) g_particle_scale = 1.0f;
             g_model_sat = (float)cvar_int("avp2m_modelsat", 200) / 100.0f;
             if (!(g_model_sat > 0.05f && g_model_sat < 8.0f)) g_model_sat = 2.0f;
@@ -2563,7 +2682,11 @@ static void render_world(const uint8_t *sd)
     set_world_rows(NULL);
     if (rc) update_world_models(rc);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
-    ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb3d);
+    {
+        ID3D11Buffer *pcbs[3] = { g_cb3d, g_cbw, g_cbdl };
+        ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 3, pcbs);
+    }
+    write_dlights(pos, 0);
     {
         ID3D11SamplerState *ss[2] = { g_samp_wrap, g_samp_linear };
         ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 2, ss);
@@ -2585,6 +2708,7 @@ static void render_world(const uint8_t *sd)
             ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
             write_camera(pos, rot, xfov, yfov, nearz, farz, hdr_on, r, u, f);
         }
+        if (pass == 1) write_dlights(pos, 1);
         for (bi = 0; bi < rc->nbatches; bi++) {
             ID3D11ShaderResourceView *srv[2];
             int lp = rc->batches[bi].lmpage;
@@ -2604,6 +2728,7 @@ static void render_world(const uint8_t *sd)
     }
 
     set_world_rows(NULL);
+    write_dlights(pos, 0);   /* models are lit on the CPU */
     draw_models(pos, r, u, f);
     draw_sprites(pos, r, u, f);
 

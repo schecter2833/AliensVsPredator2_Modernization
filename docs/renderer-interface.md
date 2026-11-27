@@ -152,7 +152,7 @@ A frame is an array of 0x18-byte entries, indexed by the poly ref's `entry`:
 | Entry | Field |
 |---|---|
 | `+0x00` / `+0x04` | lightmap data pointer / u16 byte size (0 for gouraud polys) |
-| `+0x08` / `+0x0C` / `+0x10` | gouraud polys: per-vertex **blue / green / red** byte arrays |
+| `+0x08` / `+0x0C` / `+0x10` | gouraud polys: per-vertex **red / green / blue** byte arrays (checked against the stock renderer: the blue moonlight in "Unwelcome Guests" comes out orange with the order reversed) |
 | `+0x14` | gouraud polys: vertex count |
 
 - **Lightmap data** is run-length encoded 32-bit pixels: a u32 `0x00RRGGBB`; if bit 31 is set, a u8 run length follows. At most 32×32 texels.
@@ -311,3 +311,11 @@ object to a list that `0x10022AE3` draws later).
   `mpulserifle_hh.abc` and `shoulderlamp.abc` attached.
 - **Model lists:** the stock model handler (`0x10024CEB`) puts models with colour alpha (`+0x97`)
   below 255 in a translucent list, models with flags2 `0x02` in a third list, and the rest in the solid list.
+
+## Dynamic lights on level surfaces
+
+Light objects (type 4: position `+0x194`, radius `+0x1B0`, colour bytes `+0x94`–`+0x96`) light level
+surfaces as well as models. The D3D11 renderer sends the 16 nearest to the world shader and adds
+colour / 255 × (1 − distance / radius) × N·L per pixel, with the face normal from screen-space
+derivatives. A thrown flare at strength 1 (cvar `avp2m_dlscale` 100) looks close to the stock
+renderer's glow. In "Unwelcome Guests" each marine's shoulder lamp is two such lights (radius about 100).

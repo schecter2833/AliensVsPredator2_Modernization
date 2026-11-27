@@ -17,6 +17,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - Camera from the engine's scene description (position, quaternion, FOV, viewport)
 - All level geometry from the engine's world data, textured (32-bit and DXT1/3/5, mipmapped, anisotropic filtering), with depth buffering. Textures are fetched through the engine's own GetTexture/FreeTexture callbacks.
 - Particles (smoke, sparks, blood) from the engine's particle lists, as camera-facing quads. Sized with the original formula (measured from the stock renderer); bullet-impact smoke matches the stock renderer on screen.
+- Dynamic lights (flares, the marines' shoulder lamps, muzzle flashes) on level surfaces, per pixel.
 - Canvases: effects the game draws itself through the renderer's canvas interface, such as the marines' shoulder-lamp beams.
 - Attachments (a marine's rifle and shoulder lamp) and translucent or additive models (object alpha below 255, e.g. a cloaked Predator; not yet seen in a level).
 - Objects from the engine's visibility query. Sprites are drawn (billboards and rotatable sprites, alpha/additive/multiply), which brings back the main menu's starfield and planets.
@@ -26,7 +27,9 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
-- Animated and dynamic lights on level surfaces (flickering lights, muzzle flashes, flares), sky sprites and models, model LODs
+- Animated lights on level surfaces (flickering light animations are baked once at load), sky sprites and models, model LODs
+- The in-game console isn't drawn (it opens and takes input, but is invisible)
+- Overall world brightness looks a little lower than the stock renderer; not yet measured
 - No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots
@@ -50,6 +53,8 @@ Console variables:
 | `avp2m_exposure` | 100 | HDR exposure in percent. Read live. |
 | `avp2m_modelsat` | 200 | Model color multiplier in percent (the original uses 2×). Read live. |
 | `avp2m_psize` | 100 | Extra particle size multiplier in percent, on top of the original's sizing. Read live. |
+| `avp2m_dlscale` | 100 | Strength of dynamic lights (flares, lamps) on level surfaces in percent; 0 turns them off. Read live. |
+| `avp2m_lmdump` | 0 | 1 writes lightmap atlas page 0 to `avp2m_lmpage0.bmp` at level load (diagnostics). |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
 It writes `avp2m_d3d11.log` next to the DLL.
