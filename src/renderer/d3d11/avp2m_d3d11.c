@@ -164,8 +164,18 @@ typedef struct RenderContext {
     uint32_t nbsps;
     const float **bsp_xf;            /* per frame: world-model transform (engine 4x4) or NULL */
     uint8_t *sky;                    /* per frame: 1 = BSP belongs to the sky */
-    uint32_t *vcol;                  /* CPU copy, for light animation updates later */
+    uint32_t *vcol;                  /* CPU copy, for light animation updates */
     int built;
+    /* animated light (flicker anims): polygons that reference a light animation
+       other than LightAnim_BASE are recomputed when an animation changes */
+    struct DynLM { const uint8_t *poly; int page, x, y, w, h; } *dlm;
+    uint32_t ndlm;
+    struct DynGV { const uint8_t *poly; uint32_t nv, first; } *dgv;
+    uint32_t ndgv, ndgv_cols;
+    struct DynVert { uint32_t vcol; uint32_t col; } *dvert;   /* col = dgv_cols index */
+    uint32_t ndvert;
+    uint32_t *anim_state;            /* last seen frame A/B/blend/intensity per anim */
+    uint32_t nanim_state;
 } RenderContext;
 static RenderContext *g_cur_ctx;
 static float g_lmscale = 1.0f;       /* cvar avp2m_lmscale x100 */
@@ -1208,7 +1218,7 @@ static void lm_upload(RenderContext *rc, LMBuild *lb)
         td.MipLevels = td.ArraySize = 1;
         td.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
         td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_IMMUTABLE;
+        td.Usage = D3D11_USAGE_DEFAULT;    /* animated lights update parts of it */
         td.BindFlags = D3D11_BIND_SHADER_RESOURCE;
         init.pSysMem = lb->pix[i];
         init.SysMemPitch = LM_PAGE * 4;
@@ -1252,7 +1262,7 @@ static void lm_release(RenderContext *rc)
     rc->nlmpages = 0;
 }
 
-typedef struct BuildTri { int bsp; RTexture *tex; int lmpage; WVertex v[3]; uint32_t col[3]; } BuildTri;
+typedef struct BuildTri { int bsp; RTexture *tex; int lmpage; WVertex v[3]; uint32_t col[3]; int dyn; uint8_t corner[3]; } BuildTri;
 
 static int cmp_tri(const void *a, const void *b)
 {
@@ -1268,6 +1278,37 @@ static int cmp_tri(const void *a, const void *b)
 #define SURF_SKY       0x10
 #define SURF_LIGHTMAP  0x80
 
+/* 1 if the poly references a baked light animation other than LightAnim_BASE
+ * (index 0); such polys are relit when the animation changes. */
+static int poly_has_anim(const uint8_t *world, const uint8_t *poly)
+{
+    const uint8_t *anims = RDPTR(world, 0x08), *refs = RDPTR(poly, 0x0C);
+    uint32_t nanim = RD32(world, 0x0C), nref = RD32(poly, 0x10), r;
+    if (!nref || nref > 64 || !readable(refs, nref * 4) || !readable(anims, (UINT_PTR)nanim * 0x60)) return 0;
+    for (r = 0; r < nref; r++) {
+        uint32_t ai = ((const uint16_t *)(refs + r * 4))[0];
+        uint32_t ei = ((const uint16_t *)(refs + r * 4))[1];
+        const uint8_t *anim, *e;
+        uint32_t nf, f, k;
+        if (!ai || ai >= nanim) continue;
+        anim = anims + ai * 0x60;
+        if (RD32(anim, 0x20) != 0 || ei >= *(const uint16_t *)(anim + 0x30)) continue;
+        nf = RD32(anim, 0x28);
+        for (f = 0; f < nf && f < 64; f++) {   /* any frame with light for this poly */
+            e = lm_entry(anim, (int)f, ei);
+            if (!e) continue;
+            if (RD32(e, 0) && *(const uint16_t *)(e + 4)) return 1;      /* lightmap data */
+            {
+                uint32_t nv = RD32(e, 20);
+                const uint8_t *c0 = RDPTR(e, 8), *c1 = RDPTR(e, 12), *c2 = RDPTR(e, 16);
+                if (nv && nv <= 64 && readable(c0, nv) && readable(c1, nv) && readable(c2, nv))
+                    for (k = 0; k < nv; k++) if (c0[k] | c1[k] | c2[k]) return 1;
+            }
+        }
+    }
+    return 0;
+}
+
 static void build_world(RenderContext *rc)
 {
     const uint8_t *world = (const uint8_t *)rc->world;
@@ -1277,7 +1318,7 @@ static void build_world(RenderContext *rc)
     size_t cap = 0, n = 0, i;
     WVertex *verts;
     LMBuild lb;
-    uint32_t lit = 0, lmfail = 0, gouraud = 0;
+    uint32_t lit = 0, lmfail = 0, gouraud = 0, dvcap = 0;
     double lmsum = 0;
     float grid = 1.0f;
     static uint32_t lmpix[LM_MAX_TEXELS];
@@ -1326,7 +1367,7 @@ static void build_world(RenderContext *rc)
             uint32_t nv, k, sflags;
             RTexture *tex = NULL;
             float iw = 1.0f / 64, ih = 1.0f / 64;
-            int lmpage = -1, lmx = 0, lmy = 0, have_vc = 0;
+            int lmpage = -1, lmx = 0, lmy = 0, have_vc = 0, dyn = -1;
             uint32_t vcols[64];
             float P[3] = { 0, 0, 0 }, Q[3] = { 0, 0, 0 }, O[3] = { 0, 0, 0 };
             if (!readable(poly, 0x58)) { skipped++; continue; }
@@ -1344,8 +1385,16 @@ static void build_world(RenderContext *rc)
                 uint32_t lw = poly[0x4C], lh = poly[0x4D];
                 uint32_t axis = ((uint32_t)*(const uint16_t *)(poly + 0x14) >> 11) & 7;
                 if (lw && lh && lw * lh <= LM_MAX_TEXELS && axis < 6) {
-                    if (lm_gather(world, poly, lw, lh, lmpix) &&
-                        lm_place(&lb, lmpix, (int)lw, (int)lh, &lmpage, &lmx, &lmy)) {
+                    int anim = poly_has_anim(world, poly), got = lm_gather(world, poly, lw, lh, lmpix);
+                    if (!got && anim) { memset(lmpix, 0, lw * lh * 4); got = 1; }   /* dark now, may light up */
+                    if (got && lm_place(&lb, lmpix, (int)lw, (int)lh, &lmpage, &lmx, &lmy)) {
+                        if (anim) {
+                            if ((rc->ndlm & 255) == 0) rc->dlm = (struct DynLM *)realloc(rc->dlm, (rc->ndlm + 256) * sizeof *rc->dlm);
+                            if (rc->dlm) {
+                                struct DynLM *d = &rc->dlm[rc->ndlm++];
+                                d->poly = poly; d->page = lmpage; d->x = lmx; d->y = lmy; d->w = (int)lw; d->h = (int)lh;
+                            }
+                        }
                         cross3(k_lm_ref[axis], plane, P);
                         cross3(plane, P, Q);
                         memcpy(O, poly + 0x38, sizeof O);
@@ -1365,6 +1414,15 @@ static void build_world(RenderContext *rc)
             /* Vertex colour stream: alpha 1 = lightmapped (colour unused); otherwise the
              * gouraud light from the light animations, or mid grey if there is none. */
             if (lmpage < 0 && (have_vc = lm_vertex_colors(world, poly, nv, vcols)) != 0) gouraud++;
+            dyn = -1;
+            if (lmpage < 0 && poly_has_anim(world, poly)) {   /* vertex-lit and animated */
+                if ((rc->ndgv & 255) == 0) rc->dgv = (struct DynGV *)realloc(rc->dgv, (rc->ndgv + 256) * sizeof *rc->dgv);
+                if (rc->dgv) {
+                    rc->dgv[rc->ndgv].poly = poly; rc->dgv[rc->ndgv].nv = nv; rc->dgv[rc->ndgv].first = rc->ndgv_cols;
+                    rc->ndgv_cols += nv;
+                    dyn = (int)rc->ndgv++;
+                }
+            }
             v0 = vlist;
             p0 = (const float *)RDPTR(v0, 0);
             if (!readable(p0, 12)) { skipped++; continue; }
@@ -1384,6 +1442,8 @@ static void build_world(RenderContext *rc)
                 tris[n].tex = tex;
                 tris[n].bsp = (int)b;
                 tris[n].lmpage = lmpage;
+                tris[n].dyn = dyn;
+                tris[n].corner[0] = 0; tris[n].corner[1] = (uint8_t)k; tris[n].corner[2] = (uint8_t)(k + 1);
                 tris[n].col[0] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[0] : 0x00808080u;
                 tris[n].col[1] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[k] : 0x00808080u;
                 tris[n].col[2] = lmpage >= 0 ? 0xFF000000u : have_vc ? vcols[k + 1] : 0x00808080u;
@@ -1421,6 +1481,20 @@ static void build_world(RenderContext *rc)
             for (i = 0; i < n; i++) {
                 memcpy(&verts[i * 3], tris[i].v, sizeof tris[i].v);
                 if (rc->vcol) memcpy(&rc->vcol[i * 3], tris[i].col, sizeof tris[i].col);
+                if (tris[i].dyn >= 0) {
+                    int c;
+                    if (rc->ndvert + 3 > dvcap) {
+                        dvcap = dvcap ? dvcap * 2 : 3072;
+                        rc->dvert = (struct DynVert *)realloc(rc->dvert, dvcap * sizeof *rc->dvert);
+                        if (!rc->dvert) { rc->ndvert = 0; dvcap = 0; }
+                    }
+                    if (rc->dvert && rc->dgv)
+                        for (c = 0; c < 3; c++) {
+                            rc->dvert[rc->ndvert].vcol = (uint32_t)(i * 3 + c);
+                            rc->dvert[rc->ndvert].col = rc->dgv[tris[i].dyn].first + tris[i].corner[c];
+                            rc->ndvert++;
+                        }
+                }
                 if (!rc->nbatches || rc->batches[rc->nbatches - 1].tex != tris[i].tex ||
                     rc->batches[rc->nbatches - 1].lmpage != tris[i].lmpage ||
                     rc->batches[rc->nbatches - 1].bsp != tris[i].bsp) {
@@ -1454,6 +1528,7 @@ static void build_world(RenderContext *rc)
     }
     free(tris);
     lm_upload(rc, &lb);
+    rlog("world: animated light on %lu lightmapped and %lu vertex-lit polygons", (unsigned long)rc->ndlm, (unsigned long)rc->ndgv);
     {   /* light animations: list them (kind +0x20: 0 baked frames, else shadow-mask light) */
         const uint8_t *anims = RDPTR(world, 0x08);
         uint32_t na = RD32(world, 0x0C), ai, nk = 0;
@@ -2604,6 +2679,84 @@ logged_dl:;
     }
 }
 
+/* Animated light: when any baked light animation changes frame, blend or
+ * intensity, relight the polygons that use one (lightmap rectangles and
+ * vertex colours) with the same code that built them. */
+static void update_light_anims(RenderContext *rc)
+{
+    const uint8_t *world = (const uint8_t *)rc->world, *anims;
+    uint32_t na, ai, changed = 0, i;
+    static uint32_t lmpix[LM_MAX_TEXELS];
+    static int ulog;
+    if ((!rc->ndlm && !rc->ndgv) || !readable(world, 0x10)) return;
+    anims = RDPTR(world, 0x08);
+    na = RD32(world, 0x0C);
+    if (!na || na > 4096 || !readable(anims, (UINT_PTR)na * 0x60)) return;
+    if (rc->nanim_state != na) {
+        free(rc->anim_state);
+        rc->anim_state = (uint32_t *)calloc(na * 4, 4);
+        rc->nanim_state = rc->anim_state ? na : 0;
+        changed = 1;
+    }
+    if (!rc->anim_state) return;
+    for (ai = 0; ai < na; ai++) {
+        const uint32_t *a = (const uint32_t *)(anims + ai * 0x60);
+        uint32_t *st = rc->anim_state + ai * 4;
+        if (st[0] != a[13] || st[1] != a[14] || st[2] != a[15] || st[3] != a[16]) {
+            st[0] = a[13]; st[1] = a[14]; st[2] = a[15]; st[3] = a[16];
+            changed = 1;
+        }
+    }
+    if (!changed) return;
+    for (i = 0; i < rc->ndlm; i++) {
+        const struct DynLM *d = &rc->dlm[i];
+        D3D11_BOX box;
+        if (d->page < 0 || d->page >= rc->nlmpages || !rc->lmpages[d->page].tex) continue;
+        if (!lm_gather(world, d->poly, (uint32_t)d->w, (uint32_t)d->h, lmpix)) memset(lmpix, 0, (size_t)d->w * d->h * 4);
+        box.left = (UINT)d->x; box.top = (UINT)d->y; box.right = (UINT)(d->x + d->w); box.bottom = (UINT)(d->y + d->h);
+        box.front = 0; box.back = 1;
+        ID3D11DeviceContext_UpdateSubresource(g_ctx, (ID3D11Resource *)rc->lmpages[d->page].tex, 0, &box, lmpix, (UINT)d->w * 4, 0);
+    }
+    if (rc->ndgv && rc->vcol && rc->cvb) {
+        static uint32_t *cols;
+        static uint32_t ncols;
+        D3D11_MAPPED_SUBRESOURCE map;
+        if (ncols < rc->ndgv_cols) { free(cols); cols = (uint32_t *)malloc(rc->ndgv_cols * 4); ncols = cols ? rc->ndgv_cols : 0; }
+        if (cols) {
+            for (i = 0; i < rc->ndgv; i++) {
+                const struct DynGV *g = &rc->dgv[i];
+                if (!lm_vertex_colors(world, g->poly, g->nv, cols + g->first)) memset(cols + g->first, 0, g->nv * 4);
+            }
+            for (i = 0; i < rc->ndvert; i++) rc->vcol[rc->dvert[i].vcol] = cols[rc->dvert[i].col];
+            if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)rc->cvb, 0, D3D11_MAP_WRITE_DISCARD, 0, &map))) {
+                memcpy(map.pData, rc->vcol, (size_t)rc->vcount * 4);
+                ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)rc->cvb, 0);
+            }
+        }
+    }
+    if (ulog < 3) {
+        rlog("light anims changed: relit %lu lightmaps, %lu vertex-lit polygons", (unsigned long)rc->ndlm, (unsigned long)rc->ndgv);
+        ulog++;
+    }
+    {   /* every 2 s for a while: anim intensities and mean relit vertex brightness */
+        static DWORD last;
+        static int plog;
+        DWORD now = GetTickCount();
+        if (plog < 12 && now - last > 2000 && rc->ndvert && rc->vcol) {
+            uint32_t sum = 0;
+            last = now; plog++;
+            for (i = 0; i < rc->ndvert; i++) {
+                uint32_t c = rc->vcol[rc->dvert[i].vcol];
+                sum += (c & 0xFF) + ((c >> 8) & 0xFF) + ((c >> 16) & 0xFF);
+            }
+            rlog("light anims: intensity x100 %d %d, mean relit vertex light %lu",
+                 na > 1 ? (int)(*(const float *)(anims + 0x60 + 0x40) * 100) : -1,
+                 na > 2 ? (int)(*(const float *)(anims + 0xC0 + 0x40) * 100) : -1,
+                 (unsigned long)(sum / (rc->ndvert * 3)));
+        }
+    }
+}
+
 static void render_world(const uint8_t *sd)
 {
     RenderContext *rc;
@@ -2701,6 +2854,7 @@ static void render_world(const uint8_t *sd)
     }
     set_world_rows(NULL);
     if (rc) update_world_models(rc);
+    if (rc) update_light_anims(rc);
     ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
     {
         ID3D11Buffer *pcbs[3] = { g_cb3d, g_cbw, g_cbdl };
@@ -3426,6 +3580,7 @@ static void __cdecl r_delete_context(void *ctx)
     lm_release(rc);
     if (rc->cvb) ID3D11Buffer_Release(rc->cvb);
     free(rc->vcol);
+    free(rc->dlm); free(rc->dgv); free(rc->dvert); free(rc->anim_state);
     free(rc->bsps);
     free(rc->bsp_xf);
     free(rc->sky);

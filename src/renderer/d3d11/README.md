@@ -29,7 +29,7 @@ A from-scratch replacement for the stock Direct3D 7 renderer (`d3d.ren`), writte
 - Static lighting: lightmaps (packed into 2048×2048 atlas pages, bilinear-filtered with clamped borders) and per-vertex gouraud light, both decoded from the level's `LightAnim_BASE` data. Brightness and color match the stock renderer.
 
 **Not yet:**
-- Animated lights on level surfaces (flickering light animations are baked once at load), sky sprites and models, model LODs
+- Visual check of flickering lights: animated light animations are relit when they change, but the ones in "Unwelcome Guests" are far from the start and haven't been looked at yet. Sky sprites and models, model LODs
 - No visibility culling. The whole level is one set of draw batches, which modern GPUs handle easily for 2001-era levels.
 - **Video playback:** `GetHook("LPDIRECTDRAW"/"BACKBUFFER")` returns NULL, so the engine skips the intro videos cleanly.
 - Screenshots, `RenderCommand` console commands, and the rarely used screen lock/warp slots

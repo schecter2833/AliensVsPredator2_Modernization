@@ -335,3 +335,13 @@ back buffer and returns 1, with `pixels` at the rectangle's top-left; `UnlockScr
 releases it. The engine reads and writes the pixels directly in the screen format. It's called
 during loading. (The retail game's console stays hidden with the stock renderer too, so it isn't a
 renderer feature to match.)
+
+## Animated light animations
+
+Light animations other than `LightAnim_BASE` (e.g. `Flicker1WaveLightFX0__LA`) change their current
+frames (`+0x34`/`+0x38`), blend (`+0x3C`) and intensity (`+0x40`) at run time; in "Unwelcome Guests"
+the two flicker anims switch intensity between 0 and 0.5. The D3D11 renderer records every polygon
+whose refs point at such an anim with non-zero data (348 lightmapped and 899 vertex-lit polygons in
+that level) and relights them, with the same combining code, whenever an anim changes. Note: the
+vertex-lit polygons there store full white (255) for the base and both flicker anims, so they
+saturate and don't visibly flicker.
