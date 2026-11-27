@@ -87,3 +87,15 @@ renderer Init), must not start before the first frame, and must check memory is 
 bytes (a fault on its thread silently ends the process).
 
 Side note: the official launcher starts the real game fullscreen at 640×480, which works on this machine.
+
+## Primal Hunt: stretched heads in the Zeta Site intro (not a renderer bug)
+
+In the Zeta Site intro cutscene several characters show long thin spikes from the head, and Dunya's
+hair is pulled up into a spike (the bald-looking head). The **stock renderer shows exactly the same
+thing** at the same moments (compared side by side, same frames), so it comes from the game or engine
+side on this system, not from our renderer. In the single-player menu the same character model looks
+normal. Worth a later look (animation/skinning in the engine or game code on modern Windows), since a
+fix would have to be outside the renderer.
+
+Elsewhere at the start of Zeta Site (menus, mission screen, cutscene rooms, the bunker entrance) the
+D3D11 renderer matches the stock one.

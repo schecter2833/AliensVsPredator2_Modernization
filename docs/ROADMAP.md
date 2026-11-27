@@ -14,6 +14,7 @@ The guiding rule: **never modify the original game modules or data** (`CShell.DL
 - [x] Fix the Zeta Site load crash (bug in PH `object.lto`, fixed in memory by `src/compat/game_fixes.c`)
 - [x] Run Primal Hunt with the D3D11 renderer (model pointer at +0x1FC)
 - [x] PH menus: background images fill the screen; 3D character portrait
+- [ ] PH Zeta Site intro: stretched character heads (same with the stock renderer; engine/game side)
 - [ ] Diff the AVP2 vs Primal Hunt engine interfaces (function tables, struct sizes)
 
 ## Phase 1: Replacement renderer (`d3d.ren`)
