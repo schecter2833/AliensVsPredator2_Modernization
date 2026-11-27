@@ -86,6 +86,28 @@ static ID3D11RenderTargetView *g_bb_rtv;
 static uint32_t g_bb_w, g_bb_h;
 
 static ID3D11Texture2D          *g_rt_tex;     /* game-resolution render target */
+/* HDR (cvar avp2m_hdr): the 3D scene renders into a float target and is
+ * tone mapped into g_rt before the HUD is drawn, so the 2D layer stays exact. */
+static ID3D11Texture2D          *g_hdr_tex;
+static ID3D11RenderTargetView   *g_hdr_rtv;
+static ID3D11ShaderResourceView *g_hdr_srv;
+static ID3D11VertexShader       *g_vs_fs;
+static ID3D11PixelShader        *g_ps_tonemap;
+static ID3D11Buffer             *g_cb_tm;
+static int   g_hdr;                     /* 0 off, 1 ACES filmic, 2 Reinhard */
+static float g_exposure = 1.0f;         /* cvar avp2m_exposure x100 */
+static const char k_hlsl_tm[] =
+    "cbuffer T : register(b0) { float4 p; };\n"   /* x exposure, y mode */
+    "Texture2D t : register(t0); SamplerState s : register(s0);\n"
+    "struct VO { float4 p : SV_Position; float2 uv : TEXCOORD; };\n"
+    "VO vs(uint id : SV_VertexID) { VO o; float2 q = float2((id << 1) & 2, id & 2);\n"
+    "  o.uv = q; o.p = float4(q * float2(2, -2) + float2(-1, 1), 0, 1); return o; }\n"
+    "float3 aces(float3 x) { return saturate((x * (2.51 * x + 0.03)) / (x * (2.43 * x + 0.59) + 0.14)); }\n"
+    "float4 ps(VO i) : SV_Target { float3 c = t.Sample(s, i.uv).rgb * p.x;\n"
+    /* the game's art is authored in display (gamma) space: tone map in linear, then back */
+    "  float3 lin = pow(max(c, 0), 2.2);\n"
+    "  float3 m = p.y > 1.5 ? lin / (1 + lin) * 1.25 : aces(lin * 0.8);\n"
+    "  return float4(pow(saturate(m), 1 / 2.2), 1); }\n";
 static ID3D11RenderTargetView   *g_rt_rtv;
 static ID3D11ShaderResourceView *g_rt_srv;
 
@@ -206,7 +228,7 @@ static const char k_hlsl3d[] =
     "  if (lmscale.y > 2.5) return float4(lmc, 1);\n"
     "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
     "  if (lmscale.y > 0.5) return float4(saturate(l), 1);\n"
-    "  return float4(saturate(c.rgb * l), 1); }\n"
+    "  float3 o = c.rgb * l; return float4(lmscale.z > 0.5 ? o : saturate(o), 1); }\n"
     "float4 ps_spr(VO i) : SV_Target { return t.Sample(s, i.uv) * i.c; }\n";
 
 static const char k_hlsl[] =
@@ -275,6 +297,18 @@ static int create_shaders(void)
                 rlog("sprite shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?");
             }
         }
+        if (SUCCEEDED(hr)) {
+            ID3DBlob *tv = NULL, *tp = NULL;
+            if (SUCCEEDED(compile(k_hlsl_tm, sizeof(k_hlsl_tm) - 1, "avp2mtm", NULL, NULL, "vs", "vs_4_0", 0, 0, &tv, &err)) &&
+                SUCCEEDED(compile(k_hlsl_tm, sizeof(k_hlsl_tm) - 1, "avp2mtm", NULL, NULL, "ps", "ps_4_0", 0, 0, &tp, &err))) {
+                ID3D11Device_CreateVertexShader(g_dev, ID3D10Blob_GetBufferPointer(tv), ID3D10Blob_GetBufferSize(tv), NULL, &g_vs_fs);
+                ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(tp), ID3D10Blob_GetBufferSize(tp), NULL, &g_ps_tonemap);
+            } else {
+                rlog("tone map shader compile failed: %s (HDR unavailable)", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?");
+            }
+            if (tv) ID3D10Blob_Release(tv);
+            if (tp) ID3D10Blob_Release(tp);
+        }
         if (SUCCEEDED(hr)) hr = ID3D11Device_CreateInputLayout(g_dev, il3, 4, ID3D10Blob_GetBufferPointer(vsb), ID3D10Blob_GetBufferSize(vsb), &g_layout3d);
         ID3D10Blob_Release(vsb);
         ID3D10Blob_Release(psb);
@@ -335,6 +369,8 @@ static int create_objects(void)
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb3d))) return 0;
     bd.ByteWidth = 48;
     if (FAILED(ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cbw))) return 0;
+    bd.ByteWidth = 16;
+    ID3D11Device_CreateBuffer(g_dev, &bd, NULL, &g_cb_tm);
     memset(&bd, 0, sizeof bd);
     bd.ByteWidth = sizeof(WVertex) * 6 * MAX_SPRITES;
     bd.Usage = D3D11_USAGE_DYNAMIC;
@@ -417,6 +453,11 @@ static int create_game_target(void)
     if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_rt_tex))) return 0;
     ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_rtv);
     ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)g_rt_tex, NULL, &g_rt_srv);
+    td.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_hdr_tex))) {
+        ID3D11Device_CreateRenderTargetView(g_dev, (ID3D11Resource *)g_hdr_tex, NULL, &g_hdr_rtv);
+        ID3D11Device_CreateShaderResourceView(g_dev, (ID3D11Resource *)g_hdr_tex, NULL, &g_hdr_srv);
+    }
     td.Format = DXGI_FORMAT_D24_UNORM_S8_UINT;
     td.BindFlags = D3D11_BIND_DEPTH_STENCIL;
     if (SUCCEEDED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &g_depth_tex)))
@@ -551,6 +592,9 @@ static void release_device(void)
     SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
     SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
     SAFE_RELEASE(g_ps_spr, ID3D11PixelShader);
+    SAFE_RELEASE(g_vs_fs, ID3D11VertexShader);
+    SAFE_RELEASE(g_ps_tonemap, ID3D11PixelShader);
+    SAFE_RELEASE(g_cb_tm, ID3D11Buffer);
     SAFE_RELEASE(g_cbw, ID3D11Buffer);
     SAFE_RELEASE(g_spr_vb, ID3D11Buffer);
     SAFE_RELEASE(g_spr_cvb, ID3D11Buffer);
@@ -559,6 +603,9 @@ static void release_device(void)
     SAFE_RELEASE(g_ds_test, ID3D11DepthStencilState);
     SAFE_RELEASE(g_vs3d, ID3D11VertexShader);
     SAFE_RELEASE(g_rt_srv, ID3D11ShaderResourceView);
+    SAFE_RELEASE(g_hdr_srv, ID3D11ShaderResourceView);
+    SAFE_RELEASE(g_hdr_rtv, ID3D11RenderTargetView);
+    SAFE_RELEASE(g_hdr_tex, ID3D11Texture2D);
     SAFE_RELEASE(g_rt_rtv, ID3D11RenderTargetView);
     SAFE_RELEASE(g_rt_tex, ID3D11Texture2D);
     SAFE_RELEASE(g_bb_rtv, ID3D11RenderTargetView);
@@ -1712,7 +1759,10 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_vb, 0);
     ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_mdl_cvb, 0);
     if (logged < 2) { rlog("models: %lu drawn, %lu pieces, %lu vertices", (unsigned long)nmodels, (unsigned long)nd, (unsigned long)nv_out); logged++; }
-    if (world && nmodels && glog < 1) glog++;
+    if (world && nmodels && glog < 1) {
+        rlog_dump("  rs+100", (const uint8_t *)g_rs + 0x100, 0x60);
+        glog++;
+    }
     if (!nd) return;
     {
         ID3D11Buffer *vbs[2] = { g_mdl_vb, g_mdl_cvb };
@@ -1921,6 +1971,7 @@ static void render_world(const uint8_t *sd)
     D3D11_MAPPED_SUBRESOURCE map;
     float bf[4] = { 0, 0, 0, 0 };
     static int logged;
+    int hdr_on = g_hdr && g_hdr_rtv && g_hdr_srv && g_ps_tonemap && g_vs_fs && g_cb_tm;
 
     if (!readable(sd, 0x100)) return;
     if (RD32(sd, SD_DRAWMODE) == 1) {
@@ -1959,6 +2010,9 @@ static void render_world(const uint8_t *sd)
             float sc = (float)cvar_int("avp2m_lmscale", 100) / 100.0f;
             g_lmscale = (sc > 0.05f && sc < 8.0f) ? sc : 1.0f;
             g_lmdebug = cvar_int("avp2m_lmdebug", 0);
+            g_hdr = cvar_int("avp2m_hdr", 0);
+            g_exposure = (float)cvar_int("avp2m_exposure", 100) / 100.0f;
+            if (!(g_exposure > 0.05f && g_exposure < 16.0f)) g_exposure = 1.0f;
             last = now;
         }
     }
@@ -1982,7 +2036,7 @@ static void render_world(const uint8_t *sd)
         float *o = (float *)map.pData;
         int i, j;
         for (i = 0; i < 4; i++) for (j = 0; j < 4; j++) o[i * 4 + j] = m[j * 4 + i];
-        o[16] = g_lmscale; o[17] = (float)g_lmdebug; o[18] = o[19] = 0;
+        o[16] = g_lmscale; o[17] = (float)g_lmdebug; o[18] = hdr_on ? 1.0f : 0.0f; o[19] = 0;
         ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb3d, 0);
     }
 
@@ -1994,7 +2048,13 @@ static void render_world(const uint8_t *sd)
     vp.MaxDepth = 1;
     if (vp.Width <= 0 || vp.Height <= 0) { vp.TopLeftX = vp.TopLeftY = 0; vp.Width = (float)g_w; vp.Height = (float)g_h; }
 
-    ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rt_rtv, g_dsv);
+    if (hdr_on) {
+        float black[4] = { 0, 0, 0, 1 };
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_hdr_rtv, g_dsv);
+        ID3D11DeviceContext_ClearRenderTargetView(g_ctx, g_hdr_rtv, black);
+    } else {
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rt_rtv, g_dsv);
+    }
     ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_on, 0);
     ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[OPT2D_SOLID], bf, 0xFFFFFFFFu);
     ID3D11DeviceContext_RSSetViewports(g_ctx, 1, &vp);
@@ -2038,6 +2098,28 @@ static void render_world(const uint8_t *sd)
     set_world_rows(NULL);
     draw_models(pos, r, u, f);
     draw_sprites(pos, r, u, f);
+
+    if (hdr_on) {   /* tone map the scene into the game target; the HUD is drawn on top later */
+        ID3D11ShaderResourceView *none[2] = { NULL, NULL };
+        D3D11_MAPPED_SUBRESOURCE tm;
+        ID3D11DeviceContext_OMSetRenderTargets(g_ctx, 1, &g_rt_rtv, NULL);
+        if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)g_cb_tm, 0, D3D11_MAP_WRITE_DISCARD, 0, &tm))) {
+            float *t = (float *)tm.pData;
+            t[0] = g_exposure; t[1] = (float)g_hdr; t[2] = t[3] = 0;
+            ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)g_cb_tm, 0);
+        }
+        ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_off, 0);
+        ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[OPT2D_SOLID], bf, 0xFFFFFFFFu);
+        ID3D11DeviceContext_IASetInputLayout(g_ctx, NULL);
+        ID3D11DeviceContext_IASetPrimitiveTopology(g_ctx, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLELIST);
+        ID3D11DeviceContext_VSSetShader(g_ctx, g_vs_fs, NULL, 0);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps_tonemap, NULL, 0);
+        ID3D11DeviceContext_PSSetConstantBuffers(g_ctx, 0, 1, &g_cb_tm);
+        ID3D11DeviceContext_PSSetSamplers(g_ctx, 0, 1, &g_samp_point);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &g_hdr_srv);
+        ID3D11DeviceContext_Draw(g_ctx, 3, 0);
+        ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, none);
+    }
 
     /* back to the 2D pipeline */
     {

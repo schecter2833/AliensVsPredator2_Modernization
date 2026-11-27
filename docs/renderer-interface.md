@@ -221,7 +221,9 @@ The object matrix comes from position `+0x194`, rotation `+0x9C` and scale `+0xA
 
 **Model lighting** (partly mapped):
 
-- **Light grid** at `world+0xFC`: `+0x00` cells (u32 `0x00RRGGBB`), `+0x08` y stride, `+0x20` z stride (in cells; x stride is 1), `+0x14`/`+0x18`/`+0x1C` max cell index x/y/z, `+0x24` cell size (3 floats; 2000 in "Unwelcome Guests"), `+0x30` 1/cell size, `+0x3C` grid minimum. The stock renderer samples it trilinearly at the model's position. The raw values are very dark (0–20 of 255 at the level start); the stock renderer then remaps each channel through tables at `0x1005A004` / `0x1005A104` / `0x1005A204` (not mapped yet).
+- **Light grid** at `world+0xFC`: `+0x00` cells (u32 `0x00RRGGBB`), `+0x08` y stride, `+0x20` z stride (in cells; x stride is 1), `+0x14`/`+0x18`/`+0x1C` max cell index x/y/z, `+0x24` cell size (3 floats; 2000 in "Unwelcome Guests"), `+0x30` 1/cell size, `+0x3C` grid minimum. The stock renderer samples it trilinearly at the model's position. The raw values are very dark (0–20 of 255 at the level start). The stock renderer's per-channel tables at `0x1005A004` / `0x1005A104` / `0x1005A204` turn out to be plain linear ramps, `min(255, i × light scale)`, built from the scene's light scale (1.0 here), so they don't explain the brighter stock result.
+- **Sun:** RenderStruct `+0x138` is a global light direction and `+0x144` its color (3 floats). Both are used for models; "Unwelcome Guests" has no sun (color 0).
+- **Still unexplained:** where the stock renderer's extra model brightness comes from. The remaining candidate is the game code's model hook (SceneDesc `+0xFC`, user data `+0x100`), which the stock renderer calls per model and which can change its light.
 - **Static lights:** world tree vtable slot 2 (`+0x08`, thiscall) is a box query: `+0x04` list index (1 = static lights), `+0x08` min, `+0x14` max, `+0x2C` `void cb(light, user)`, `+0x30` user. Light: `+0x68` position, `+0x74` radius, `+0x78` color (3 floats, 0–255), `+0x84` direction, `+0x90` cone cosine, `+0x94` outer color.
 - **Dynamic lights:** light objects (type 4): position `+0x194`, radius `+0x1B0`, color bytes `+0x94`–`+0x96`.
 

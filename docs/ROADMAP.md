@@ -44,6 +44,15 @@ Our renderer owns every pixel, so graphics upgrades can live there without touch
 - [ ] Model replacement (higher-poly models) once the model format is mapped
 - [ ] Config file for all of the above, plus an in-game toggle
 
+## HDR lighting
+The renderer is set up so lighting can grow past the original 0–255 range without clipping.
+- [x] HDR scene target: with `avp2m_hdr 1` the 3D scene renders into a 16-bit float target and is tone mapped (ACES or Reinhard, with exposure) before the HUD, which stays untouched.
+- [ ] Linear-space lighting: convert textures and light values to linear before shading (the game's art is authored in display/gamma space).
+- [ ] Overbright light sources: let lightmaps, the light grid and dynamic lights exceed 1.0 (muzzle flashes, flares, fires) instead of clamping.
+- [ ] Bloom from the bright parts of the HDR image, and eye adaptation (auto exposure) for dark corridors versus bright outdoor areas.
+- [ ] HDR display output (scRGB / HDR10 swap chain) on monitors that support it.
+- [ ] Per-pixel dynamic lights with normal maps from texture packs.
+
 ## Rust
 New components get written in Rust where it fits; the existing C renderer gets ported once its 3D contract is stable.
 - Every engine boundary is a plain C ABI (`RenderDLLSetup`, cdecl slot tables), so a Rust `cdylib` built for `i686-pc-windows-gnu` or `-msvc` can replace any C component one at a time.

@@ -42,6 +42,8 @@ Console variables:
 | `windowed` | 0 | 1 = window, 0 = borderless fullscreen |
 | `avp2m_vsync` | 1 | 0 disables vsync. The game is uncapped without it. |
 | `avp2m_lmscale` | 100 | Light brightness in percent (lightmaps and vertex light). Read live. |
+| `avp2m_hdr` | 0 | HDR scene rendering: 1 = ACES filmic tone mapping, 2 = Reinhard. The 3D scene renders into a 16-bit float target and is tone mapped before the HUD is drawn, so the HUD is unaffected. Read live. |
+| `avp2m_exposure` | 100 | HDR exposure in percent. Read live. |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 
 It writes `avp2m_d3d11.log` next to the DLL.
