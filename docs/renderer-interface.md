@@ -300,3 +300,14 @@ object to a list that `0x10022AE3` draws later).
   5 add signed). Stock defaults: blend off, z test on, z write on, src alpha / inv src alpha.
 - In "Unwelcome Guests" the marines' shoulder-lamp beams are a canvas: two additive
   (one, one) quads per lamp, faded by the texture.
+
+## Attachments and translucent models
+
+- **Attachments:** object `+0x98` is a list of attachment records (next at `+0x24`). For each,
+  RenderStruct `+0x00` is the engine's `ProcessAttachment(parent, attachment)` (cdecl): it places
+  the attached object and returns it. The stock renderer then draws it like any other object
+  (`d3d.ren` `0x10039900`). Attached objects have `+0x124 & 0x400` set ("drawn through the parent"),
+  which the stock renderer only checks on top-level objects. In "Unwelcome Guests" each marine has
+  `mpulserifle_hh.abc` and `shoulderlamp.abc` attached.
+- **Model lists:** the stock model handler (`0x10024CEB`) puts models with colour alpha (`+0x97`)
+  below 255 in a translucent list, models with flags2 `0x02` in a third list, and the rest in the solid list.

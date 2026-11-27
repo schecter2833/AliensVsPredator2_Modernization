@@ -171,7 +171,7 @@ static int g_sun_on;
 static float g_model_sat = 2.0f;        /* model color multiplier (stock: 2x); cvar avp2m_modelsat x100 */
 static int g_lmdebug;                /* cvar avp2m_lmdebug: 1 light only, 2 vertex colour only */
 static ID3D11VertexShader *g_vs3d;
-static ID3D11PixelShader  *g_ps3d, *g_ps_spr;
+static ID3D11PixelShader  *g_ps3d, *g_ps_spr, *g_ps_mdl;
 static ID3D11DepthStencilState *g_ds_test;      /* depth test, no depth write */
 static ID3D11Buffer *g_cbw;                     /* b1: object-to-world rows (3 x float4) */
 #define MAX_SPRITES 16384             /* sprites plus particles */
@@ -231,7 +231,9 @@ static const char k_hlsl3d[] =
     "  if (lmscale.y > 1.5) return float4(i.c.rgb, 1);\n"
     "  if (lmscale.y > 0.5) return float4(saturate(l), 1);\n"
     "  float3 o = c.rgb * l; return float4(lmscale.z > 0.5 ? o : saturate(o), 1); }\n"
-    "float4 ps_spr(VO i) : SV_Target { return t.Sample(s, i.uv) * i.c; }\n";
+    "float4 ps_spr(VO i) : SV_Target { return t.Sample(s, i.uv) * i.c; }\n"
+    "float4 ps_mdl(VO i) : SV_Target { float4 c = t.Sample(s, i.uv); float3 o = c.rgb * i.c.rgb;\n"
+    "  return float4(lmscale.z > 0.5 ? o : saturate(o), c.a * i.c.a); }\n";
 
 static const char k_hlsl[] =
     "cbuffer C : register(b0) { float4 xf; };\n"
@@ -297,6 +299,13 @@ static int create_shaders(void)
                 ID3D10Blob_Release(sb);
             } else {
                 rlog("sprite shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?");
+            }
+            sb = NULL;
+            if (SUCCEEDED(compile(k_hlsl3d, sizeof(k_hlsl3d) - 1, "avp2m3d", NULL, NULL, "ps_mdl", "ps_4_0", 0, 0, &sb, &err))) {
+                ID3D11Device_CreatePixelShader(g_dev, ID3D10Blob_GetBufferPointer(sb), ID3D10Blob_GetBufferSize(sb), NULL, &g_ps_mdl);
+                ID3D10Blob_Release(sb);
+            } else {
+                rlog("translucent model shader compile failed: %s", err ? (char *)ID3D10Blob_GetBufferPointer(err) : "?");
             }
         }
         if (SUCCEEDED(hr)) {
@@ -594,6 +603,7 @@ static void release_device(void)
     SAFE_RELEASE(g_layout3d, ID3D11InputLayout);
     SAFE_RELEASE(g_ps3d, ID3D11PixelShader);
     SAFE_RELEASE(g_ps_spr, ID3D11PixelShader);
+    SAFE_RELEASE(g_ps_mdl, ID3D11PixelShader);
     SAFE_RELEASE(g_vs_fs, ID3D11VertexShader);
     SAFE_RELEASE(g_ps_tonemap, ID3D11PixelShader);
     SAFE_RELEASE(g_cb_tm, ID3D11Buffer);
@@ -1466,7 +1476,8 @@ static uint32_t g_nvis_objs, g_nvis_seen;
  *          vertex is sum(weight * (node transform * offset))
  *   triangle +0x00 u16 indices[3], +0x08 uv[3] (float pairs) */
 typedef const float *(__fastcall *PFN_NodeXforms)(void *self, void *edx);
-typedef struct MdlDraw { RTexture *tex; UINT first, count; } MdlDraw;
+/* blend: 0 solid, 1 alpha (object alpha < 255), 2 additive (flags2 0x04) */
+typedef struct MdlDraw { RTexture *tex; UINT first, count; int blend; } MdlDraw;
 
 static void xform34(const float *m, const float *v, float *o)
 {
@@ -1668,7 +1679,8 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
     static uint32_t light[4096];
     D3D11_MAPPED_SUBRESOURCE mv, mc;
     WVertex *vv;
-    uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0, k;
+    uint32_t *cc, i, nv_out = 0, nd = 0, nmodels = 0, k, malpha = 0, ntrans = 0;
+    int mblend = 0;
     static int logged, glog, mlog;
     float bf[4] = { 0, 0, 0, 0 }, mamb[3] = { 1, 1, 1 }, mcol[3] = { 1, 1, 1 };
 
@@ -1698,6 +1710,26 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
         if (!readable(nodes, nnodes * 64)) continue;
         object_matrix(o, campos, cr, cu, cf, om);
         nmodels++;
+        {   /* name each model once (diagnostics) */
+            static const uint8_t *named[256];
+            static uint32_t nnamed;
+            uint32_t j;
+            for (j = 0; j < nnamed && named[j] != o; j++) ;
+            if (j == nnamed && nnamed < 256) {
+                const char *fn = (const char *)RDPTR(m, 0x04);
+                if (!readable(fn, 8) || fn[0] < 0x20 || fn[0] > 0x7E) fn = (const char *)(m + 0x04);   /* inline name */
+                const float *op = (const float *)(o + OBJ_POS);
+                named[nnamed++] = o;
+                rlog("model %p: %s at %d,%d,%d flags %08lx flags2 %08lx rgba %02x%02x%02x%02x", (const void *)o,
+                     (fn[0] >= 0x20 && fn[0] <= 0x7E) ? fn : "?", (int)op[0], (int)op[1], (int)op[2],
+                     (unsigned long)RD32(o, OBJ_FLAGS), (unsigned long)RD32(o, OBJ_FLAGS2), o[0x94], o[0x95], o[0x96], o[0x97]);
+            }
+        }
+        {   /* the stock renderer sorts models with alpha < 255 into a translucent list */
+            uint32_t a8 = o[0x97];
+            mblend = (RD32(o, OBJ_FLAGS2) & 4) ? 2 : (a8 < 255 && g_ps_mdl) ? 1 : 0;
+            malpha = mblend ? (a8 << 24) : 0;
+        }
         {   /* ambient from the world light grid at the model, tinted by the object color */
             float amb[3] = { 160, 160, 160 };
             const float *lp = (RD32(o, OBJ_FLAGS) & 0x40) ? campos : (const float *)(o + OBJ_POS);
@@ -1799,6 +1831,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
             }
             list[nd].tex = tex;
             list[nd].first = nv_out;
+            list[nd].blend = mblend;
             for (ti = 0; ti < ntris; ti++) {
                 const uint8_t *t = tris + ti * 0x20;
                 const float *uv = (const float *)(t + 8);
@@ -1811,7 +1844,7 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
                     w->u = uv[c * 2]; w->v = uv[c * 2 + 1];
                     w->lu = w->lv = 0;
                     w->rgba = 0;
-                    cc[nv_out] = light[idx];
+                    cc[nv_out] = light[idx] | malpha;
                     nv_out++;
                 }
             }
@@ -1840,10 +1873,33 @@ static void draw_models(const float *campos, const float *cr, const float *cu, c
     }
     for (i = 0; i < nd; i++) {
         ID3D11ShaderResourceView *srv[2];
+        if (list[i].blend) { ntrans++; continue; }
         srv[0] = list[i].tex ? list[i].tex->srv : g_white_srv;
         srv[1] = g_white_srv;
         ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
         ID3D11DeviceContext_Draw(g_ctx, list[i].count, list[i].first);
+    }
+    if (ntrans) {   /* translucent and additive models: after the solid ones, depth test without writes */
+        int cur = -1;
+        static int tlog;
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps_mdl, NULL, 0);
+        ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_test, 0);
+        for (i = 0; i < nd; i++) {
+            ID3D11ShaderResourceView *srv[2];
+            if (!list[i].blend) continue;
+            if (list[i].blend != cur) {
+                cur = list[i].blend;
+                ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[cur == 2 ? OPT2D_ADD : OPT2D_ALPHA], bf, 0xFFFFFFFFu);
+            }
+            srv[0] = list[i].tex ? list[i].tex->srv : g_white_srv;
+            srv[1] = g_white_srv;
+            ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 2, srv);
+            ID3D11DeviceContext_Draw(g_ctx, list[i].count, list[i].first);
+        }
+        ID3D11DeviceContext_OMSetDepthStencilState(g_ctx, g_ds_on, 0);
+        ID3D11DeviceContext_OMSetBlendState(g_ctx, g_blend[OPT2D_SOLID], bf, 0xFFFFFFFFu);
+        ID3D11DeviceContext_PSSetShader(g_ctx, g_ps3d, NULL, 0);
+        if (tlog < 5) { rlog("models: %lu translucent or additive pieces", (unsigned long)ntrans); tlog++; }
     }
 }
 
@@ -2810,6 +2866,61 @@ static void dump_model(uint8_t *o)
     }
 }
 
+
+/* Attachments (a marine's gun, a Predator's mask): object +0x98 is a list of
+ * attachment records (next at +0x24). For each, RenderStruct +0x00 is the
+ * engine's ProcessAttachment(parent, attachment), which places the attached
+ * object and returns it; the stock renderer then draws it like any other
+ * object (d3d.ren 0x10039900). Attached objects can have attachments too. */
+typedef uint8_t *(__cdecl *PFN_ProcessAttachment)(const uint8_t *parent, const uint8_t *attachment);
+static void add_attachments(void)
+{
+    uint32_t i, n0 = g_nvis_objs, added = 0;
+    static int alog;
+    PFN_ProcessAttachment pa;
+    if (!g_rs || !g_rs->engine_0x00) return;
+    pa = (PFN_ProcessAttachment)(uintptr_t)g_rs->engine_0x00;
+    for (i = 0; i < g_nvis_objs && i < MAX_VIS_OBJECTS; i++) {   /* grows as children are added */
+        const uint8_t *o = g_vis_objs[i], *at;
+        uint32_t guard = 0;
+        if (!readable(o, 0x9C)) continue;
+        {
+            static int clog;
+            if (o[OBJ_TYPE] == 1 && (RD32(o, OBJ_FLAGS) & 0x40000) && clog < 4) {
+                clog++;
+                rlog("attach: character %p +98 = %08lx", (const void *)o, (unsigned long)RD32(o, 0x98));
+            }
+        }
+        for (at = RDPTR(o, 0x98); at && guard < 32 && readable(at, 0x28); at = RDPTR(at, 0x24), guard++) {
+            uint8_t *child = pa(o, at);
+            uint32_t j;
+            {
+                static int dlog;
+                if (dlog < 4) {
+                    dlog++;
+                    rlog("attach: parent %p type %d att %p -> child %p type %d flags %08lx flags2 %08lx +124 %08lx",
+                         (const void *)o, o[OBJ_TYPE], (const void *)at, (void *)child,
+                         child && readable(child, 0x1C0) ? child[OBJ_TYPE] : -1,
+                         child && readable(child, 0x1C0) ? (unsigned long)RD32(child, OBJ_FLAGS) : 0ul,
+                         child && readable(child, 0x1C0) ? (unsigned long)RD32(child, OBJ_FLAGS2) : 0ul,
+                         child && readable(child, 0x1C0) ? (unsigned long)RD32(child, 0x124) : 0ul);
+                    rlog_dump("  att", at, 0x28);
+                }
+            }
+            /* +0x124 & 0x400 marks objects drawn through their parent; the stock
+               renderer checks it on top-level objects only */
+            if (!child || !readable(child, 0x1C0) || !(RD32(child, OBJ_FLAGS) & 1) || (RD32(child, OBJ_FLAGS2) & 0x100)) continue;
+            for (j = 0; j < g_nvis_objs && g_vis_objs[j] != child; j++) ;
+            if (j < g_nvis_objs || g_nvis_objs >= MAX_VIS_OBJECTS) continue;
+            g_vis_objs[g_nvis_objs++] = child;
+            added++;
+        }
+    }
+    if (added && alog < 3) {
+        rlog("attachments: %lu objects added to %lu", (unsigned long)added, (unsigned long)n0);
+        alog++;
+    }
+}
 static void collect_objects(const uint8_t *world, const float *eye)
 {
     VisQuery q;
@@ -2935,6 +3046,7 @@ static int __cdecl r_render_scene(void *scene)
                 if (readable(o, 0x1C0) && obj_wanted(o)) g_vis_objs[g_nvis_objs++] = o;
             }
     }
+    add_attachments();
     if (g_ctx) render_world(sd);
     return 1;
 }
