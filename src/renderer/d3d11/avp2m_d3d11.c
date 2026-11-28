@@ -21,6 +21,7 @@
 #include <stdlib.h>
 #include <stdio.h>
 #include "../../compat/game_fixes.h"
+#include "../../compat/cursor_hooks.h"
 #include <stddef.h>
 #include <string.h>
 #include <math.h>
@@ -84,6 +85,7 @@ static uint32_t g_w = 640, g_h = 480;          /* game render resolution */
  * horizontal FOV (Hor+); everything 2D stays 4:3 in the middle, g_xoff pixels from the left. */
 static uint32_t g_tw = 640, g_xoff = 0;
 static int g_widescreen = 1;
+static float g_disp_x0, g_disp_y0, g_disp_s;   /* game pixel (0,0) and scale in the window, from the last Present */
 
 static ID3D11Device        *g_dev;
 static ID3D11DeviceContext *g_ctx;
@@ -3643,7 +3645,10 @@ static void present_frame(void)
     dw = g_tw * s;
     dh = g_h * s;
     x0 = ((float)g_bb_w - dw) * 0.5f;
+    g_disp_x0 = x0 + g_xoff * s;   /* where game pixel 0 lands in the window (for cursor mapping) */
+    g_disp_s = s;
     y0 = ((float)g_bb_h - dh) * 0.5f;
+    g_disp_y0 = y0;
 
     bind_pipeline(g_bb_rtv, (float)g_bb_w, (float)g_bb_h,
                   (s == 1.0f) ? g_samp_point : g_samp_linear);
@@ -3659,6 +3664,33 @@ static void present_frame(void)
 }
 
 uint32_t g_frame_no;
+
+/* Cursor calls from the game assume the window is the game's display mode. When the image is scaled
+ * (borderless fullscreen), map game-pixel rectangles and points to where the image is shown. */
+static void cursor_log(const char *line) { rlog("%s", line); }
+static void cursor_map(void *user, int kind, long *d)
+{
+    POINT o = { 0, 0 };
+    float s = g_disp_s;
+    (void)user;
+    if (!g_hwnd || !(s > 0) || (s == 1.0f && g_disp_x0 == 0 && g_disp_y0 == 0)) return;
+    ClientToScreen(g_hwnd, &o);
+    if (kind == CURSOR_MAP_RECT) {
+        long w = d[2] - d[0], h = d[3] - d[1];
+        /* only a game-mode-sized rectangle at the window origin (what the engine passes) */
+        if (d[0] != o.x || d[1] != o.y || w != (long)g_w || h != (long)g_h) return;
+        d[0] = o.x + (long)g_disp_x0;
+        d[1] = o.y + (long)g_disp_y0;
+        d[2] = o.x + (long)(g_disp_x0 + g_w * s);
+        d[3] = o.y + (long)(g_disp_y0 + g_h * s);
+    } else {
+        long gx = d[0] - o.x, gy = d[1] - o.y;
+        if (gx < 0 || gy < 0 || gx > (long)g_w || gy > (long)g_h) return;
+        d[0] = o.x + (long)(g_disp_x0 + gx * s);
+        d[1] = o.y + (long)(g_disp_y0 + gy * s);
+    }
+}
+
 static void __cdecl r_swap_buffers(uint32_t flags)
 {
     (void)flags;
@@ -3672,6 +3704,30 @@ static void __cdecl r_swap_buffers(uint32_t flags)
             else rlog("game fixes disabled (avp2m_gamefixes 0)");
         }
         if (avp2m_game_fix_news(&fname, &fwhere)) rlog("game fix applied at %p: %s", fwhere, fname);
+    }
+    {   /* cursor call hooks (src/compat/cursor_hooks.c); cshell.dll loads late, so look again every second */
+        static DWORD last;
+        static int on = -1;
+        DWORD now = GetTickCount();
+        if (on < 0) {
+            on = cvar_int("avp2m_cursorhooks", 1) != 0;
+            if (on) avp2m_cursor_hooks_init(cursor_log, cursor_map, NULL);
+        }
+        if (on && now - last > 1000) { avp2m_hook_cursor_apis(); last = now; }
+    }
+    {   /* automated test runs: avp2m_quitafter N closes the game N seconds after the first frame */
+        static DWORD t0;
+        static int secs = -1, closing;
+        DWORD now = GetTickCount();
+        if (secs < 0) { secs = cvar_int("avp2m_quitafter", 0); t0 = now; }
+        if (secs > 0 && !closing && now - t0 > (DWORD)secs * 1000u) {
+            rlog("avp2m_quitafter %d: closing the game", secs);
+            closing = 1;
+            PostMessageA(g_hwnd, WM_CLOSE, 0, 0);
+        } else if (closing && now - t0 > (DWORD)secs * 1000u + 8000u) {
+            rlog("avp2m_quitafter: still running, exiting");
+            ExitProcess(0);
+        }
     }
     if (g_ctx && g_swap) present_frame();
 }

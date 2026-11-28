@@ -26,6 +26,7 @@ target_link_libraries(avp2m_trace PRIVATE user32 kernel32)
 add_library(avp2m_d3d11 SHARED
   src/renderer/d3d11/avp2m_d3d11.c
   src/compat/game_fixes.c
+  src/compat/cursor_hooks.c
   src/renderer/d3d11/avp2m_d3d11.def)
 set_target_properties(avp2m_d3d11 PROPERTIES PREFIX "" SUFFIX ".ren")
 target_link_libraries(avp2m_d3d11 PRIVATE d3d11 dxgi dxguid user32 kernel32)

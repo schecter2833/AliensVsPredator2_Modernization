@@ -72,7 +72,8 @@ New components get written in Rust where it fits; the existing C renderer gets p
 An injected DLL that patches `lithtech.exe` at runtime. The files on disk are never touched.
 - [x] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game). Done in the renderer: `avp2m_maxfps` (high-resolution waitable timer; holds 60 exactly with vsync off)
 - [ ] Frame-time / physics fix for high FPS (movement, jumping and wall-walking break above ~60 FPS)
-- [ ] Raw mouse input in place of DirectInput 7; fix mouse acceleration
+- [x] Raw mouse input / acceleration: not needed. The engine already reads DirectInput deltas (no Windows pointer acceleration) and pins the Windows cursor to the window centre every frame, so menus and mouselook work in scaled fullscreen. Cursor calls are hooked and logged (`src/compat/cursor_hooks.c`); game-mode-sized `ClipCursor` rectangles would be mapped to the shown image
+- [x] `avp2m_quitafter N`: closes the game N seconds after the first frame, for unattended test runs
 - [ ] Controller support (XInput / SDL)
 - [ ] **Master server: use the community one.** AvP Unknown already runs a master server for both games through their Master Server Patch (v2.4 for AVP2, v1.1 for Primal Hunt), which swaps in a modified client shell and server. Writing a second master would split the small player base, so the goal here is compatibility: test our renderer and fixes with the patch installed, and document the setup. (The stock 1.0.9.6 server code still heartbeats `master%i.gamespy.com` and answers GameSpy status queries; the original browser used Sierra's WON directory servers.)
 - [ ] NAT-friendly hosting notes and port documentation
