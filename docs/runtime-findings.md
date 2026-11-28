@@ -123,3 +123,8 @@ used to be pillarboxed. The D3D11 renderer now makes its game target as wide as 
 
 The frame limiter (`avp2m_maxfps`) waits on a high-resolution waitable timer before Present and spins the last
 half millisecond. With `avp2m_vsync 0` and `avp2m_maxfps 60`, the logged average was 60 fps in every 10-second window.
+
+## Multiplayer master server and mouse input (static findings)
+
+- **Master server:** `object.lto` (the game server code) contains a GameSpy query responder (`\status\`, `\players\`, `\rules\`, `\secure\`/`\validate\`) and heartbeats to `master%i.gamespy.com`. It also carries WONAPI with a `DirectoryServer` client, Sierra's own server directory. Both services are long gone. The AvP Unknown community's Master Server Patch replaces the client shell and server to use their master, and we aim to stay compatible with it rather than run another one.
+- **Mouse:** neither `lithtech.exe` nor `cshell.dll` imports `GetCursorPos`, and the engine's window procedure (0x4034D0 in AVP2 `lithtech.exe`) handles no mouse messages. All mouse input goes through DirectInput. The device setup at 0x43F2D4 uses cooperative level 5 (exclusive | foreground) for one device type and 6 (non-exclusive | foreground) for the others, so the menu cursor is moved by DirectInput deltas, not by the Windows cursor position. With our upscaled borderless fullscreen, Windows cursor positions and game cursor positions are therefore not tied together. Synthetic absolute clicks from the remote test tool miss for that reason. Whether a real mouse is affected (hardware cursor drawn by Windows vs. the game's internal cursor) still needs a hands-on check.

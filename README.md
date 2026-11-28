@@ -8,7 +8,7 @@ A community project to modernize **Aliens versus Predator 2** (Monolith, 2001) a
 
 - Run well on Windows 10/11 with modern GPUs: native widescreen, high resolutions and refresh rates, stable alt-tab.
 - Fix long-standing engine problems: physics that break at high frame rates, mouse look, and input.
-- **Keep multiplayer working.** Stay wire-compatible with stock 1.0.9.6 clients and servers, and replace the dead GameSpy master server.
+- **Keep multiplayer working.** Stay wire-compatible with stock 1.0.9.6 clients and servers, and work with the community master server (AvP Unknown's Master Server Patch) that replaced the dead official one.
 - Support both **AVP2** and **Primal Hunt**.
 - Long term: an open replacement for the engine (`lithtech.exe` / `server.dll`) that loads the original game modules, plus a Linux dedicated server.
 

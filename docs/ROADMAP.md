@@ -62,7 +62,7 @@ The renderer is set up so lighting can grow past the original 0–255 range with
 New components get written in Rust where it fits; the existing C renderer gets ported once its 3D contract is stable.
 - Every engine boundary is a plain C ABI (`RenderDLLSetup`, cdecl slot tables), so a Rust `cdylib` built for `i686-pc-windows-gnu` or `-msvc` can replace any C component one at a time.
 - Order:
-  1. Master server: standalone, runs anywhere, no 32-bit constraint, so it's a good first Rust component.
+  1. Tools that run outside the game (log/trace analysis, a protocol dissector helper, test harnesses): standalone, no 32-bit constraint. (A master server was planned here, but the community already runs one; see Phase 2.)
   2. Renderer: port `avp2m_d3d11.c` to Rust (`windows` crate for D3D11) after Milestone 2. Today it's one ~1,500-line file, so the port is cheap. Porting it now would mean doing the 3D reverse engineering twice.
   3. Hook layer and dedicated server: Rust from the start.
 - The clean-room header (`render_struct.h`) becomes a `#[repr(C)]` module with the same size checks.
@@ -74,7 +74,7 @@ An injected DLL that patches `lithtech.exe` at runtime. The files on disk are ne
 - [ ] Frame-time / physics fix for high FPS (movement, jumping and wall-walking break above ~60 FPS)
 - [ ] Raw mouse input in place of DirectInput 7; fix mouse acceleration
 - [ ] Controller support (XInput / SDL)
-- [ ] **Master server:** redirect the GameSpy server list and heartbeat to a community-run master (OpenSpy or a new one written for this project)
+- [ ] **Master server: use the community one.** AvP Unknown already runs a master server for both games through their Master Server Patch (v2.4 for AVP2, v1.1 for Primal Hunt), which swaps in a modified client shell and server. Writing a second master would split the small player base, so the goal here is compatibility: test our renderer and fixes with the patch installed, and document the setup. (The stock 1.0.9.6 server code still heartbeats `master%i.gamespy.com` and answers GameSpy status queries; the original browser used Sierra's WON directory servers.)
 - [ ] NAT-friendly hosting notes and port documentation
 
 ## Phase 3: Networking documentation
