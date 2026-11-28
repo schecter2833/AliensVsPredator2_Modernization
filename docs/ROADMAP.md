@@ -32,7 +32,8 @@ Client-side only, so no effect on multiplayer.
 - [ ] **Milestone 2:** 3D world in D3D11 (`RenderScene`: world geometry, lightmaps, models, sprites, particles, effects)
 - [ ] Video playback (the engine asks for DirectDraw hooks)
 - [x] Native widescreen and Hor+ FOV, done in the renderer (`avp2m_widescreen`): the game still picks a 4:3 mode, the game target is made as wide as the window, full-screen 3D scenes fill it with a wider horizontal FOV, and menus/HUD stay 4:3 in the middle
-- [ ] HUD elements anchored to the screen edges in widescreen (needs to know which 2D draws are HUD)
+- [x] HUD elements anchored to the screen edges in widescreen (`avp2m_hudedges`): 2D blits after a full-screen scene are grouped into elements (glyph runs from one surface on one line) and moved to the left/right edge when they sit in the outer part of the 4:3 screen; full-screen overlays stretch to the full width. Checked with the Primal Hunt corporate and predator HUDs
+- [ ] Primal Hunt outdoor levels (predator `exp1s1`): sky draws white; sky sprites/models still to do
 - [ ] Arbitrary resolutions, high refresh rates
 - [ ] Correct HUD/menu scaling at 16:9 and 21:9
 - [x] Borderless fullscreen with aspect-correct scaling; window centered correctly on wide displays
@@ -73,7 +74,7 @@ An injected DLL that patches `lithtech.exe` at runtime. The files on disk are ne
 - [x] Frame limiter: the stock engine runs uncapped (2000+ fps in menus, ~900 fps in game). Done in the renderer: `avp2m_maxfps` (high-resolution waitable timer; holds 60 exactly with vsync off)
 - [ ] Frame-time / physics fix for high FPS (movement, jumping and wall-walking break above ~60 FPS)
 - [x] Raw mouse input / acceleration: not needed. The engine already reads DirectInput deltas (no Windows pointer acceleration) and pins the Windows cursor to the window centre every frame, so menus and mouselook work in scaled fullscreen. Cursor calls are hooked and logged (`src/compat/cursor_hooks.c`); game-mode-sized `ClipCursor` rectangles would be mapped to the shown image
-- [x] `avp2m_quitafter N`: closes the game N seconds after the first frame, for unattended test runs
+- [x] `avp2m_quitafter N`: closes the game N seconds after the first frame, and `avp2m_shotevery N` saves the game image every N seconds to `avp2m_shots\`, for unattended test runs (start a level directly with `+runworld worlds\exp\exh1s1`)
 - [ ] Controller support (XInput / SDL)
 - [ ] **Master server: use the community one.** AvP Unknown already runs a master server for both games through their Master Server Patch (v2.4 for AVP2, v1.1 for Primal Hunt), which swaps in a modified client shell and server. Writing a second master would split the small player base, so the goal here is compatibility: test our renderer and fixes with the patch installed, and document the setup. (The stock 1.0.9.6 server code still heartbeats `master%i.gamespy.com` and answers GameSpy status queries; the original browser used Sierra's WON directory servers.)
 - [ ] NAT-friendly hosting notes and port documentation

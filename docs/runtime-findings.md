@@ -133,3 +133,11 @@ half millisecond. With `avp2m_vsync 0` and `avp2m_maxfps 60`, the logged average
   - With a real mouse, clicks land where the drawn cursor is, whatever the window size.
   - Remote-control tools that "click at x,y" can't work, because they move the Windows cursor to an absolute spot. Test automation has to drive the menus with the keyboard, or with relative moves away from the window centre.
   - DirectInput deltas aren't affected by Windows pointer acceleration, so no separate raw-input layer is needed for that.
+
+## Widescreen HUD and unattended test runs
+
+- **Level IDs:** Primal Hunt levels live in `Worlds\exp\`: `exh*` corporate (Dunya, `exh1s1` is Zeta Site), `exa*` alien, `exp*` predator. `+runworld worlds\exp\exh1s1` on the command line starts straight into a level, so a test can run without touching the menus. Combine it with `avp2m_shotevery` and `avp2m_quitafter`.
+- **How the HUD reaches the screen:** all HUD drawing arrives as `BlitToScreen` calls from surfaces, text as one blit per glyph. In a widescreen frame, the renderer queues the blits that come after the full-screen scene and draws them at the next point where order matters: a clear, another scene, LockScreen, a surface upload or delete, or Present.
+- **Grouping into elements:** neighbouring blits of one surface on one line form an element. Elements entirely in the left 42% of the 4:3 screen move to the left edge, elements entirely in the right 42% move to the right edge, and the rest stay centred, so subtitles and centred text keep their place. Full-screen blits are stretched across the whole width.
+- **Results:** checked on the corporate HUD (health/armour, ammo, motion tracker), the predator HUD (energy and health columns, mask icons) and the cutscene subtitles.
+- **Remote-control note:** the test copy's `lithtech.exe` can be granted to the remote-control tool only while it is running (it is matched by its process name).

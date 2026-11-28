@@ -85,6 +85,14 @@ static uint32_t g_w = 640, g_h = 480;          /* game render resolution */
  * horizontal FOV (Hor+); everything 2D stays 4:3 in the middle, g_xoff pixels from the left. */
 static uint32_t g_tw = 640, g_xoff = 0;
 static int g_widescreen = 1;
+/* HUD to the screen edges (cvar avp2m_hudedges, default 1). In a widescreen frame with a full-screen
+ * scene, 2D blits after the scene are collected, grouped into elements (runs of glyphs from one surface
+ * on one line), and each element moves to the left or right screen edge when it sits in that part of the
+ * 4:3 screen. Full-screen overlays are stretched to the whole width. */
+typedef struct HudQuad { ID3D11ShaderResourceView *srv; int blend; float x0, y0, x1, y1, u0, v0, u1, v1; uint32_t rgba; } HudQuad;
+#define MAX_HUD_QUADS 8192
+static HudQuad g_hud[MAX_HUD_QUADS];
+static int g_nhud, g_hud_frame, g_hud_edges = 1;
 static float g_disp_x0, g_disp_y0, g_disp_s;   /* game pixel (0,0) and scale in the window, from the last Present */
 
 static ID3D11Device        *g_dev;
@@ -791,6 +799,42 @@ static void begin_game_pass(void)
     bind_pipeline_at(g_rt_rtv, (float)g_xoff, (float)g_w, (float)g_h, g_samp_point);
 }
 
+/* Draw the collected HUD blits (see g_hud). Called before anything else draws to the game target. */
+static void flush_hud(void)
+{
+    int i, j, n = g_nhud;
+    float lim_l, lim_r, off = (float)g_xoff;
+    if (!n) return;
+    g_nhud = 0;
+    flush_batch();
+    bind_pipeline_at(g_rt_rtv, 0, (float)g_tw, (float)g_h, g_samp_point);   /* whole wide target, x in target pixels */
+    lim_l = (float)g_w * 0.42f;
+    lim_r = (float)g_w * 0.58f;
+    for (i = 0; i < n; i = j) {
+        float l = g_hud[i].x0, r = g_hud[i].x1, dx, k;
+        int full = g_hud[i].x0 <= 0.5f && g_hud[i].x1 >= (float)g_w - 0.5f;
+        /* a run: same surface, same line, each blit starting near where the last one ended */
+        for (j = i + 1; j < n && !full; j++) {
+            const HudQuad *a = &g_hud[j - 1], *b = &g_hud[j];
+            float gw = a->x1 - a->x0;
+            if (b->srv != a->srv || b->y0 != a->y0 || b->y1 != a->y1) break;
+            if (b->x0 < a->x1 - 2.0f || b->x0 > a->x1 + (gw > 8.0f ? gw : 8.0f)) break;
+            if (b->x1 > r) r = b->x1;
+        }
+        if (full) j = i + 1;
+        dx = off;                                   /* default: stays in the middle */
+        if (!full && r <= lim_l) dx = 0;            /* left part of the 4:3 screen: to the left edge */
+        else if (!full && l >= lim_r) dx = 2 * off; /* right part: to the right edge */
+        for (k = (float)i; (int)k < j; k += 1.0f) {
+            const HudQuad *q = &g_hud[(int)k];
+            if (full) push_quad(q->srv, q->blend, 0, q->y0, (float)g_tw, q->y1, q->u0, q->v0, q->u1, q->v1, q->rgba);
+            else push_quad(q->srv, q->blend, q->x0 + dx, q->y0, q->x1 + dx, q->y1, q->u0, q->v0, q->u1, q->v1, q->rgba);
+        }
+    }
+    flush_batch();
+    begin_game_pass();
+}
+
 /* ------------------------------------------------------------------ */
 /* Surfaces                                                             */
 /* ------------------------------------------------------------------ */
@@ -803,6 +847,7 @@ static int upload_surface(Surface *s, uint32_t key)
     uint32_t x, y, keyrgb = key & 0x00FFFFFFu;
     int use_key = (key != COLORKEY_NONE);
 
+    flush_hud();   /* queued HUD blits may still use this surface's old texture */
     tmp = (uint32_t *)malloc((size_t)s->w * s->h * 4);
     if (!tmp) return 0;
     for (y = 0; y < s->h; y++) {
@@ -2980,6 +3025,7 @@ static void render_world(const uint8_t *sd)
             vp.TopLeftX = 0;
             vp.Width = (float)g_tw;
             write_camera(pos, rot, xfov, yfov, nearz, farz, hdr_on, r, u, f);
+            g_hud_frame = g_hud_edges;
         } else {
             vp.TopLeftX += (float)g_xoff;   /* sub-rect scenes stay inside the 4:3 area */
         }
@@ -3109,6 +3155,7 @@ static int __cdecl r_init(RenderInit *init)
     g_windowed = cvar_int("windowed", 0) == 1;
     g_vsync = cvar_int("avp2m_vsync", 1) != 0;
     g_widescreen = cvar_int("avp2m_widescreen", 1) != 0;
+    g_hud_edges = cvar_int("avp2m_hudedges", 1) != 0;
     g_lmscale = (float)cvar_int("avp2m_lmscale", 100) / 100.0f;
     if (!(g_lmscale > 0.05f && g_lmscale < 8.0f)) g_lmscale = 1.0f;
     g_lmdebug = cvar_int("avp2m_lmdebug", 0);
@@ -3154,6 +3201,7 @@ static void __cdecl r_term(int full)
 
 static void __cdecl r_clear(LTRect *rect, uint32_t flags, const float *color)
 {
+    flush_hud();
     float c[4] = { 0, 0, 0, 1 };
     if (g_ctx && g_dsv && (flags & CLEAR_DEPTH))
         ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
@@ -3523,6 +3571,7 @@ static void dump_scene(const uint8_t *sd)
 static int __cdecl r_render_scene(void *scene)
 {
     const uint8_t *sd = (const uint8_t *)scene;
+    flush_hud();
     g_cur_sd = sd;
     dump_scene(sd);
     g_nvis_objs = 0;
@@ -3574,6 +3623,52 @@ static void enforce_fullscreen_window(void)
     }
 }
 
+
+/* Write a B8G8R8A8 texture (the game target) to a 24-bit BMP. Returns 1 on success. */
+static int save_texture_bmp(ID3D11Texture2D *src, const char *path)
+{
+    D3D11_TEXTURE2D_DESC td;
+    ID3D11Texture2D *st = NULL;
+    D3D11_MAPPED_SUBRESOURCE m;
+    FILE *f;
+    uint32_t y, x, row, sz;
+    uint8_t hdr[54], *line;
+    int ok = 0;
+    if (!src || !g_dev || !g_ctx) return 0;
+    ID3D11Texture2D_GetDesc(src, &td);
+    td.Usage = D3D11_USAGE_STAGING;
+    td.BindFlags = 0;
+    td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    td.MiscFlags = 0;
+    if (FAILED(ID3D11Device_CreateTexture2D(g_dev, &td, NULL, &st))) return 0;
+    flush_batch();
+    ID3D11DeviceContext_CopyResource(g_ctx, (ID3D11Resource *)st, (ID3D11Resource *)src);
+    if (SUCCEEDED(ID3D11DeviceContext_Map(g_ctx, (ID3D11Resource *)st, 0, D3D11_MAP_READ, 0, &m))) {
+        row = (td.Width * 3 + 3) & ~3u;
+        sz = row * td.Height;
+        line = (uint8_t *)calloc(1, row);
+        f = fopen(path, "wb");
+        if (f && line) {
+            memset(hdr, 0, sizeof hdr);
+            hdr[0] = 'B'; hdr[1] = 'M';
+            *(uint32_t *)(hdr + 2) = 54 + sz; *(uint32_t *)(hdr + 10) = 54; *(uint32_t *)(hdr + 14) = 40;
+            *(int32_t *)(hdr + 18) = (int32_t)td.Width; *(int32_t *)(hdr + 22) = (int32_t)td.Height;
+            *(uint16_t *)(hdr + 26) = 1; *(uint16_t *)(hdr + 28) = 24; *(uint32_t *)(hdr + 34) = sz;
+            fwrite(hdr, 1, 54, f);
+            for (y = td.Height; y-- > 0;) {   /* bottom-up */
+                const uint8_t *px = (const uint8_t *)m.pData + (size_t)y * m.RowPitch;
+                for (x = 0; x < td.Width; x++) { line[x * 3] = px[x * 4]; line[x * 3 + 1] = px[x * 4 + 1]; line[x * 3 + 2] = px[x * 4 + 2]; }
+                fwrite(line, 1, row, f);
+            }
+            ok = 1;
+        }
+        if (f) fclose(f);
+        free(line);
+        ID3D11DeviceContext_Unmap(g_ctx, (ID3D11Resource *)st, 0);
+    }
+    ID3D11Texture2D_Release(st);
+    return ok;
+}
 
 /* Frame limiter (cvar avp2m_maxfps, 0 = off; read live). The stock engine runs uncapped and vsync
  * only caps at the refresh rate, which on 144-240 Hz monitors is still fast enough to upset the game's
@@ -3638,6 +3733,8 @@ static void present_frame(void)
         create_backbuffer_view();
     }
 
+    flush_hud();
+    g_hud_frame = 0;
     /* Scale the game image to the window, preserving aspect ratio. */
     sx = (float)g_bb_w / (float)g_tw;
     sy = (float)g_bb_h / (float)g_h;
@@ -3657,6 +3754,20 @@ static void present_frame(void)
     flush_batch();
     ID3D11DeviceContext_PSSetShaderResources(g_ctx, 0, 1, &none);
 
+    {   /* avp2m_shotevery N: save the game image every N seconds (unattended test runs), up to 20 */
+        static DWORD t0, lastread;
+        static int every, n;
+        DWORD now = GetTickCount();
+        if (now - lastread > 1000) { every = cvar_int("avp2m_shotevery", 0); lastread = now; if (!t0) t0 = now; }
+        if (every > 0 && n < 20 && now - t0 >= (DWORD)every * 1000u) {
+            char path[64];
+            CreateDirectoryA("avp2m_shots", NULL);
+            sprintf(path, "avp2m_shots\\shot_%02d.bmp", n);
+            if (save_texture_bmp(g_rt_tex, path)) rlog("screenshot %s (%lux%lu)", path, (unsigned long)g_tw, (unsigned long)g_h);
+            n++;
+            t0 = now;
+        }
+    }
     limit_frame_rate();
     IDXGISwapChain_Present(g_swap, g_vsync ? 1 : 0, 0);
     g_batch_srv = NULL;
@@ -3768,6 +3879,7 @@ static void *__cdecl r_create_surface(int w, int h)
 static void __cdecl r_delete_surface(Surface *s)
 {
     if (!s) return;
+    flush_hud();
     if (g_batch_srv && g_batch_srv == s->srv) {
         flush_batch();
         g_batch_srv = NULL;
@@ -3841,6 +3953,13 @@ static void __cdecl r_blit_to_screen(BlitRequest *req)
     v0 = (float)sr->top / (float)s->h;
     u1 = (float)sr->right / (float)s->w;
     v1 = (float)sr->bottom / (float)s->h;
+    if (g_hud_frame && g_nhud < MAX_HUD_QUADS) {
+        HudQuad *q = &g_hud[g_nhud++];
+        q->srv = s->srv; q->blend = blend;
+        q->x0 = (float)dr->left; q->y0 = (float)dr->top; q->x1 = (float)dr->right; q->y1 = (float)dr->bottom;
+        q->u0 = u0; q->v0 = v0; q->u1 = u1; q->v1 = v1; q->rgba = rgba;
+        return;
+    }
     push_quad(s->srv, blend, (float)dr->left, (float)dr->top, (float)dr->right, (float)dr->bottom,
               u0, v0, u1, v1, rgba);
 }
@@ -3905,6 +4024,7 @@ static int __cdecl r_lock_screen(int l, int t, int r, int b, void **pixels, long
     uint32_t y;
     static int slog;
     if (g_scr_locked || !g_dev || !g_rt_tex) return 0;
+    flush_hud();
     if (l < 0) l = 0;
     if (t < 0) t = 0;
     if (r > (int)g_w) r = (int)g_w;
@@ -3960,7 +4080,11 @@ static void __cdecl r_unlock_screen(void)
     }
 }
 static int  __cdecl r_warp_to_screen(void *req)              { (void)req; return 0; }
-static void __cdecl r_make_screenshot(const char *file)      { rlog("MakeScreenShot(%s): not implemented yet", file ? file : "?"); }
+static void __cdecl r_make_screenshot(const char *file)
+{
+    int ok = file && save_texture_bmp(g_rt_tex, file);
+    rlog("MakeScreenShot(%s): %s", file ? file : "?", ok ? "written" : "failed");
+}
 static void __cdecl r_read_console_variables(void)           { }
 static void __cdecl r_blit_from_screen(void *req)            { (void)req; }
 
