@@ -85,6 +85,7 @@ static uint32_t g_w = 640, g_h = 480;          /* game render resolution */
  * horizontal FOV (Hor+); everything 2D stays 4:3 in the middle, g_xoff pixels from the left. */
 static uint32_t g_tw = 640, g_xoff = 0;
 static int g_widescreen = 1;
+static uint32_t g_last_clear;   /* last screen clear colour (RGB), diagnostics */
 /* HUD to the screen edges (cvar avp2m_hudedges, default 1). In a widescreen frame with a full-screen
  * scene, 2D blits after the scene are collected, grouped into elements (runs of glyphs from one surface
  * on one line), and each element moves to the left or right screen edge when it sits in that part of the
@@ -1395,6 +1396,7 @@ static void build_world(RenderContext *rc)
     const uint8_t *world = (const uint8_t *)rc->world;
     const uint8_t *list;
     uint32_t nbsp, b, total_polys = 0, skipped = 0, hidden = 0, untextured = 0;
+    int draw_untextured = cvar_int("avp2m_untextured", 0);   /* 1: draw texture-less surfaces white */
     BuildTri *tris = NULL;
     size_t cap = 0, n = 0, i;
     WVertex *verts;
@@ -1461,7 +1463,23 @@ static void build_world(RenderContext *rc)
             sflags = RD32(surface, 0x30);
             if (sflags & (SURF_INVISIBLE | SURF_SKY)) { hidden++; continue; }
             tex = get_texture((void *)(uintptr_t)RD32(surface, 0x2C));
-            if (tex) { iw = 1.0f / (float)tex->w; ih = 1.0f / (float)tex->h; } else untextured++;
+            if (tex) { iw = 1.0f / (float)tex->w; ih = 1.0f / (float)tex->h; }
+            else {
+                static int ulog;
+                untextured++;
+                if (ulog < 12) {
+                    ulog++;
+                    const float *vp0 = (const float *)RDPTR(vlist, 0);
+                    int px = 0, py = 0, pz = 0;
+                    if (readable(vp0, 12)) { px = (int)vp0[0]; py = (int)vp0[1]; pz = (int)vp0[2]; }
+                    rlog("untextured poly: bsp %lu surface flags %08lx texture handle %08lx nv %lu at %d,%d,%d",
+                         (unsigned long)b, (unsigned long)sflags, (unsigned long)RD32(surface, 0x2C), (unsigned long)nv, px, py, pz);
+                }
+                /* Surfaces with no texture at all (handle 0) are not drawn: in Primal Hunt's exp1s1 they are
+                   large blocker brushes (flags 0x01000160) that covered the sky in white. A texture that
+                   exists but failed to load still draws, untextured, so missing art stays visible. */
+                if (!RD32(surface, 0x2C) && !draw_untextured) { hidden++; continue; }
+            }
             if ((sflags & SURF_LIGHTMAP) && readable(poly, 0x50)) {
                 uint32_t lw = poly[0x4C], lh = poly[0x4D];
                 uint32_t axis = ((uint32_t)*(const uint16_t *)(poly + 0x14) >> 11) & 7;
@@ -3075,9 +3093,39 @@ static void render_world(const uint8_t *sd)
         static int sky_logged;
         if (sky_logged < 2) {
             rlog("sky: %d sky BSPs, sky camera %d,%d,%d", nsky, (int)skypos[0], (int)skypos[1], (int)skypos[2]);
+            if (sky_logged == 0) {   /* diagnostics: what the sky pass has to draw */
+                const uint8_t *list = RDPTR(sd, SD_SKY_OBJS);
+                uint32_t n = RD32(sd, SD_SKY_COUNT), i, ty[16];
+                const float *bmin = (const float *)(sd + SD_SKY_MIN);
+                memset(ty, 0, sizeof ty);
+                if (n <= 4096 && readable(list, n * 4))
+                    for (i = 0; i < n; i++) {
+                        const uint8_t *o = RDPTR(list, i * 4);
+                        if (readable(o, 0x200)) {
+                            ty[o[OBJ_TYPE] & 15]++;
+                            if (o[OBJ_TYPE] != 2 && i < 40)
+                                rlog("  sky obj %p type %d flags %08lx pos %d,%d,%d", (const void *)o, o[OBJ_TYPE],
+                                     (unsigned long)RD32(o, OBJ_FLAGS), (int)((const float *)(o + OBJ_POS))[0],
+                                     (int)((const float *)(o + OBJ_POS))[1], (int)((const float *)(o + OBJ_POS))[2]);
+                        }
+                    }
+                rlog("  sky objects %lu: models %lu, world models %lu, sprites %lu, other %lu; sky box %d,%d,%d .. %d,%d,%d",
+                     (unsigned long)n, (unsigned long)ty[1], (unsigned long)ty[2], (unsigned long)ty[3],
+                     (unsigned long)(n - ty[1] - ty[2] - ty[3]), (int)bmin[0], (int)bmin[1], (int)bmin[2],
+                     (int)bmin[3], (int)bmin[4], (int)bmin[5]);
+                for (i = 0; i < rc->nbatches; i++) {
+                    int bb = rc->batches[i].bsp;
+                    if (bb < 0 || (uint32_t)bb >= rc->nbsps || !rc->sky[bb]) continue;
+                    rlog("  sky batch %lu: bsp %d tex %p %lux%lu tris %lu lmpage %d", (unsigned long)i, bb,
+                         (void *)rc->batches[i].tex, rc->batches[i].tex ? (unsigned long)rc->batches[i].tex->w : 0ul,
+                         rc->batches[i].tex ? (unsigned long)rc->batches[i].tex->h : 0ul,
+                         (unsigned long)(rc->batches[i].count / 3), rc->batches[i].lmpage);
+                }
+                rlog("  last clear colour %08lx", (unsigned long)g_last_clear);
+            }
             sky_logged++;
         }
-      for (pass = nsky ? 0 : 1; pass < 2; pass++) {
+      for (pass = (nsky && cvar_int("avp2m_skypass", 1)) ? 0 : 1; pass < 2; pass++) {
         if (pass == 0) {
             write_camera(skypos, rot, xfov, yfov, 1.0f, 200000.0f, hdr_on, sr, su, sf);
         } else if (nsky) {
@@ -3207,6 +3255,16 @@ static void __cdecl r_clear(LTRect *rect, uint32_t flags, const float *color)
         ID3D11DeviceContext_ClearDepthStencilView(g_ctx, g_dsv, D3D11_CLEAR_DEPTH, 1.0f, 0);
     if (!g_ctx || !(flags & CLEAR_SCREEN)) return;
     if (color) { c[0] = color[0] / 255.0f; c[1] = color[1] / 255.0f; c[2] = color[2] / 255.0f; }
+    {
+        uint32_t cc = color ? ((uint32_t)color[0] << 16 | (uint32_t)color[1] << 8 | (uint32_t)color[2]) : 0xFF000000u;
+        static int nlog;
+        if (cc != g_last_clear && nlog < 40) {
+            nlog++;
+            rlog("clear colour %08lx flags %lx rect %s%ld,%ld,%ld,%ld", (unsigned long)cc, (unsigned long)flags, rect ? "" : "(none) ",
+                 rect ? (long)rect->left : 0L, rect ? (long)rect->top : 0L, rect ? (long)rect->right : 0L, rect ? (long)rect->bottom : 0L);
+        }
+        g_last_clear = cc;
+    }
     if (!rect || (rect->left <= 0 && rect->top <= 0 &&
                   rect->right >= (int32_t)g_w && rect->bottom >= (int32_t)g_h)) {
         flush_batch();

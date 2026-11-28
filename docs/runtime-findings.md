@@ -141,3 +141,12 @@ half millisecond. With `avp2m_vsync 0` and `avp2m_maxfps 60`, the logged average
 - **Grouping into elements:** neighbouring blits of one surface on one line form an element. Elements entirely in the left 42% of the 4:3 screen move to the left edge, elements entirely in the right 42% move to the right edge, and the rest stay centred, so subtitles and centred text keep their place. Full-screen blits are stretched across the whole width.
 - **Results:** checked on the corporate HUD (health/armour, ammo, motion tracker), the predator HUD (energy and health columns, mask icons) and the cutscene subtitles.
 - **Remote-control note:** the test copy's `lithtech.exe` can be granted to the remote-control tool only while it is running (it is matched by its process name).
+
+## Primal Hunt predator level: the "white sky"
+
+In `exp1s1` the sky looked solid white. These tests ruled things out:
+- the sky pass was off and the sky was still white
+- every screen clear was black (logged)
+- the 15 sky world models are all textured
+
+A vertex-colour debug view showed the sky geometry drawn normally. The white came from 310 level surfaces with no texture at all (texture handle 0, surface flags `0x01000160`). These are large blocker brushes that our renderer drew as plain white, in front of the sky and the distant rock arches. They are now skipped, and the green sky and the arches show. The other levels tested have 0-5 such surfaces. The sky colour hasn't been compared with the stock renderer yet.

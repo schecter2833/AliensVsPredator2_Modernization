@@ -62,6 +62,8 @@ Console variables:
 | `avp2m_cursorhooks` | 1 | Hooks and logs the game's Windows cursor calls, mapping game-mode-sized clip rectangles and points to the scaled image. Read at startup. |
 | `avp2m_quitafter` | 0 | Closes the game this many seconds after the first frame (unattended test runs). |
 | `avp2m_shotevery` | 0 | Saves the game image every N seconds to `avp2m_shots\shot_NN.bmp` (up to 20). `MakeScreenShot` from the engine also works now. |
+| `avp2m_untextured` | 0 | 1 draws level surfaces that have no texture at all as plain white (diagnostics). Read at level load. |
+| `avp2m_skypass` | 1 | 0 skips the sky pass (diagnostics). Read per frame. |
 | `avp2m_lmdump` | 0 | 1 writes lightmap atlas page 0 to `avp2m_lmpage0.bmp` at level load (diagnostics). |
 | `avp2m_lmdebug` | 0 | Debug views: 1 light only, 2 vertex light, 3 lightmaps, 4 lightmapped (red) vs gouraud (green). Read live. |
 

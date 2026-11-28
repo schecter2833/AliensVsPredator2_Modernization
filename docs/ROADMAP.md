@@ -33,7 +33,7 @@ Client-side only, so no effect on multiplayer.
 - [ ] Video playback (the engine asks for DirectDraw hooks)
 - [x] Native widescreen and Hor+ FOV, done in the renderer (`avp2m_widescreen`): the game still picks a 4:3 mode, the game target is made as wide as the window, full-screen 3D scenes fill it with a wider horizontal FOV, and menus/HUD stay 4:3 in the middle
 - [x] HUD elements anchored to the screen edges in widescreen (`avp2m_hudedges`): 2D blits after a full-screen scene are grouped into elements (glyph runs from one surface on one line) and moved to the left/right edge when they sit in the outer part of the 4:3 screen; full-screen overlays stretch to the full width. Checked with the Primal Hunt corporate and predator HUDs
-- [ ] Primal Hunt outdoor levels (predator `exp1s1`): sky draws white; sky sprites/models still to do
+- [x] Primal Hunt predator `exp1s1` "white sky": it was 310 texture-less blocker surfaces (surface flags 0x01000160, texture handle 0) drawn white in front of the sky. They are now skipped (`avp2m_untextured 1` draws them). Other tested levels have 0-5 such surfaces
 - [ ] Arbitrary resolutions, high refresh rates
 - [ ] Correct HUD/menu scaling at 16:9 and 21:9
 - [x] Borderless fullscreen with aspect-correct scaling; window centered correctly on wide displays
