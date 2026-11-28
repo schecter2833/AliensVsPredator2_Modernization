@@ -149,4 +149,4 @@ In `exp1s1` the sky looked solid white. These tests ruled things out:
 - every screen clear was black (logged)
 - the 15 sky world models are all textured
 
-A vertex-colour debug view showed the sky geometry drawn normally. The white came from 310 level surfaces with no texture at all (texture handle 0, surface flags `0x01000160`). These are large blocker brushes that our renderer drew as plain white, in front of the sky and the distant rock arches. They are now skipped, and the green sky and the arches show. The other levels tested have 0-5 such surfaces. The sky colour hasn't been compared with the stock renderer yet.
+A vertex-colour debug view showed the sky geometry drawn normally. The white came from 310 level surfaces with no texture at all (texture handle 0, surface flags `0x01000160`). These are large blocker brushes that our renderer drew as plain white, in front of the sky and the distant rock arches. They are now skipped, and the green sky and the arches show. The other levels tested have 0-5 such surfaces. Compared with the stock renderer at the same spot: same green sky and arches.
